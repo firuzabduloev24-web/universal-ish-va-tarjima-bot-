@@ -1,0 +1,46 @@
+name: 24/7 MessengerUP & UpPremium Server
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '*/30 * * * *'
+  push:
+    branches: [ main ]
+    paths:
+      - 'bot_server.py'
+      - '.github/workflows/uppremium_server.yml'
+
+concurrency:
+  group: uppremium-bot-runner
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  run-uppremium-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Repozitoriyni yuklab olish
+        uses: actions/checkout@v4
+
+      - name: Python 3.11 o'rnatish
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Botni 24/7 rejimda ishga tushirish (5.5 soatlik sikl)
+        run: |
+          timeout 19500s python bot_server.py || true
+
+      - name: up_ecosystem.db bazasini GitHub-ga avtomatik saqlash
+        if: always()
+        run: |
+          git config --global user.name "GitHub Actions Bot"
+          git config --global user.email "actions@github.com"
+          git pull --rebase origin main || true
+          git add up_ecosystem.db
+          git diff --staged --quiet || git commit -m "Auto-save UpPremium database"
+          git push origin main || true
