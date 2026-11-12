@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import threading
 import time
@@ -10,8 +11,8 @@ TOKEN = "9288572880:AAHaa4ea7lKvmSA8A4OMr0OJSMfv6SrZt54"
 ADMIN_ID = 1021089367
 ADMIN_USERNAME = "@usman_khasan"
 API_URL = f"https://api.telegram.org/bot{TOKEN}/"
+PORT = int(os.environ.get("PORT", 8080))
 
-# --- 1. MA'LUMOTLAR BAZASI ---
 conn = sqlite3.connect("up_ecosystem.db", check_same_thread=False)
 db_lock = threading.Lock()
 
@@ -48,7 +49,6 @@ def get_user_data(user_id):
         row = cur.fetchone()
         prem = bool(row[0]) if row else False
         stars = row[1] if row else 0
-        
         cur.execute("SELECT module_name FROM modules WHERE user_id = ?", (user_id,))
         mods = [r[0] for r in cur.fetchall()]
         return (prem, stars, mods)
@@ -72,8 +72,10 @@ def send_message(chat_id, text, reply_markup=None):
         payload["reply_markup"] = reply_markup
     tg_request("sendMessage", payload)
 
-def edit_message(chat_id, message_id, text):
+def edit_message(chat_id, message_id, text, reply_markup=None):
     payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "Markdown"}
+    if reply_markup:
+        payload["reply_markup"] = reply_markup
     tg_request("editMessageText", payload)
 
 def handle_update(update):
@@ -89,7 +91,6 @@ def handle_update(update):
         if text.startswith("/start"):
             parts = text.split(maxsplit=1)
             args = parts[1] if len(parts) > 1 else ""
-
             kb = {
                 "inline_keyboard": [
                     [{"text": "🇺🇿 Uzcard / Humo (O'zbekiston)", "callback_data": f"pay_uz_{args}"}],
@@ -97,7 +98,6 @@ def handle_update(update):
                     [{"text": "🚀 4 ta Maxsus Modulni Yoqish", "callback_data": "modules_menu"}]
                 ]
             }
-
             prem, stars, mods = get_user_data(user_id)
             status_text = "Faol ✅" if prem else "Faol emas ❌"
             reply = (
@@ -138,9 +138,17 @@ def handle_update(update):
         elif "photo" in msg or "document" in msg:
             username = f"@{user.get('username')}" if user.get("username") else "Mavjud emas"
             full_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
-            caption = f"💰 *Yangi to'lov cheki!*\n🆔 ID: `{user_id}`\n👤 {full_name} ({username})\n\nPremium berish: `/give_prem {user_id}`"
+            caption = (
+                f"💰 *Yangi to'lov cheki!*\n"
+                f"🆔 ID: `{user_id}`\n"
+                f"👤 {full_name} ({username})\n\n"
+                f"Premium: `/give_prem {user_id}`\n"
+                f"100 UpStar: `/give_stars {user_id} 100`"
+            )
             if "photo" in msg:
                 tg_request("sendPhoto", {"chat_id": ADMIN_ID, "photo": msg["photo"][-1]["file_id"], "caption": caption, "parse_mode": "Markdown"})
+            elif "document" in msg:
+                tg_request("sendDocument", {"chat_id": ADMIN_ID, "document": msg["document"]["file_id"], "caption": caption, "parse_mode": "Markdown"})
             send_message(chat_id, "✅ Chek adminga yuborildi! Tez orada tasdiqlanadi.")
 
     elif "callback_query" in update:
@@ -156,26 +164,26 @@ def handle_update(update):
         if data.startswith("pay_uz"):
             msg_text = (
                 f"💳 *O'zbekiston kartalari orqali to'lov:*\n\n"
-                f"🔹 **Uzcard:** `5614682112210333`\n"
-                f"🔹 **Humo:** `9860170111318102`\n"
+                f"🔹 *Uzcard:* `5614682112210333`\n"
+                f"🔹 *Humo:* `9860170111318102`\n"
                 f"(Khasanov U.)\n\n"
-                f"Narxlar:\n"
                 f"• UpPremium (1 oy): 35,000 so'm\n"
                 f"• 100 UpStar: 15,000 so'm\n\n"
-                f"To'lovdan so'ng chekni shu botga yuboring! 📌"
+                f"To'lovdan so'ng chekni shu botga yuboring! 📌\n"
+                f"🆔 Sizning ID: `{user_id}`"
             )
             edit_message(chat_id, message_id, msg_text)
 
         elif data.startswith("pay_visa"):
             msg_text = (
                 f"🌍 *Xalqaro Visa kartalari orqali to'lov:*\n\n"
-                f"🔹 **Visa SUM:** `4023060506933828`\n"
-                f"🔹 **Visa USD:** `4023060246442007`\n"
+                f"🔹 *Visa SUM:* `4023060506933828`\n"
+                f"🔹 *Visa USD:* `4023060246442007`\n"
                 f"(Khasanov U.)\n\n"
-                f"Narxlar:\n"
                 f"• UpPremium (1 oy): $3.00\n"
                 f"• 100 UpStar: $1.50\n\n"
-                f"To'lovdan so'ng chekni yuboring! 📌"
+                f"To'lovdan so'ng chekni shu botga yuboring! 📌\n"
+                f"🆔 Sizning ID: `{user_id}`"
             )
             edit_message(chat_id, message_id, msg_text)
 
@@ -183,14 +191,13 @@ def handle_update(update):
             prem, stars, mods = get_user_data(user_id)
             kb = {
                 "inline_keyboard": [
-                    [{"text": "🛡️ Ghost Vault (" + ("Faol ✅" if "GhostVault" in mods else "Faol emas ❌") + ")", "callback_data": "activ_GhostVault"}],
-                    [{"text": "🤖 AI Manager (" + ("Faol ✅" if "AIManager" in mods else "Faol emas ❌") + ")", "callback_data": "activ_AIManager"}],
-                    [{"text": "🌐 Mesh Network (" + ("Faol ✅" if "MeshNetwork" in mods else "Faol emas ❌") + ")", "callback_data": "activ_MeshNetwork"}],
-                    [{"text": "💰 Media-Paywall (" + ("Faol ✅" if "MediaPaywall" in mods else "Faol emas ❌") + ")", "callback_data": "activ_MediaPaywall"}],
-                    [{"text": "🔙 Orqaga", "callback_data": "back_start"}]
+                    [{"text": "🛡️ Ghost Vault (" + ("Faol ✅" if "GhostVault" in mods else "Yoqish") + ")", "callback_data": "activ_GhostVault"}],
+                    [{"text": "🤖 AI Manager (" + ("Faol ✅" if "AIManager" in mods else "Yoqish") + ")", "callback_data": "activ_AIManager"}],
+                    [{"text": "🌐 Mesh Network (" + ("Faol ✅" if "MeshNetwork" in mods else "Yoqish") + ")", "callback_data": "activ_MeshNetwork"}],
+                    [{"text": "💰 Media-Paywall (" + ("Faol ✅" if "MediaPaywall" in mods else "Yoqish") + ")", "callback_data": "activ_MediaPaywall"}]
                 ]
             }
-            edit_message(chat_id, message_id, "🧩 *Sizning 4 ta maxsus modulingiz*\nUlarni ishga tushirish uchun tanlang:", kb)
+            edit_message(chat_id, message_id, "🧩 *Sizning 4 ta maxsus modulingiz:*", kb)
 
         elif data.startswith("activ_"):
             mod_name = data.split("_")[1]
@@ -202,18 +209,6 @@ def handle_update(update):
                     pass
             edit_message(chat_id, message_id, f"✅ *{mod_name}* moduli muvaffaqiyatli faollashtirildi!")
 
-        elif data == "back_start":
-            prem, stars, mods = get_user_data(user_id)
-            status_text = "Faol ✅" if prem else "Faol emas ❌"
-            kb = {
-                "inline_keyboard": [
-                    [{"text": "🇺🇿 Uzcard / Humo", "callback_data": "pay_uz"}],
-                    [{"text": "🌍 Visa (SUM / USD)", "callback_data": "pay_visa"}],
-                    [{"text": "🚀 4 ta Maxsus Modulni Yoqish", "callback_data": "modules_menu"}]
-                ]
-            }
-            edit_message(chat_id, message_id, f"🚀 *MessengerUP Rasmiy Boti*\n\n🆔 ID: `{user_id}`\n💎 UpPremium: *{status_text}*\n✨ Balans: *{stars}*", kb)
-
 class APIServer(BaseHTTPRequestHandler):
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
@@ -223,12 +218,11 @@ class APIServer(BaseHTTPRequestHandler):
         except ValueError:
             uid = 0
 
-        # 1. Foydalanuvchi VIP statusi va balansini tekshirish
-        if parsed.path == "/status":
+        if parsed.path == "/":
+            body = json.dumps({"status": "MessengerUP 24/7 Server Active"}).encode("utf-8")
+        elif parsed.path == "/status":
             prem, stars, _ = get_user_data(uid)
             body = json.dumps({"is_premium": prem, "upstars": stars}).encode("utf-8")
-
-        # 2. A foydalanuvchidan B foydalanuvchiga UP Stars o'tkazish
         elif parsed.path == "/transfer":
             try:
                 from_id = int(params.get("from_id", ["0"])[0])
@@ -236,11 +230,9 @@ class APIServer(BaseHTTPRequestHandler):
                 amount = int(params.get("amount", ["0"])[0])
             except ValueError:
                 from_id, to_id, amount = 0, 0, 0
-
             ensure_user(from_id)
             ensure_user(to_id)
             _, sender_stars, _ = get_user_data(from_id)
-
             if amount > 0 and sender_stars >= amount:
                 with db_lock:
                     conn.execute("UPDATE users SET upstars = upstars - ? WHERE user_id = ?", (amount, from_id))
@@ -250,7 +242,6 @@ class APIServer(BaseHTTPRequestHandler):
                 body = json.dumps({"ok": True, "new_balance": sender_stars - amount}).encode("utf-8")
             else:
                 body = json.dumps({"ok": False, "error": "Balans yetarli emas"}).encode("utf-8")
-
         elif parsed.path == "/modules":
             _, _, mods = get_user_data(uid)
             body = json.dumps({"modules": mods}).encode("utf-8")
@@ -266,9 +257,10 @@ class APIServer(BaseHTTPRequestHandler):
 
     def log_message(self, format, *args):
         pass
+
 if __name__ == "__main__":
-    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", 8080), APIServer).serve_forever(), daemon=True).start()
-    print("✅ Bot va API server ishga tushdi!")
+    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), APIServer).serve_forever(), daemon=True).start()
+    print(f"✅ MessengerUP Server {PORT}-portda 24/7 rejimda ishga tushdi!")
     offset = 0
     while True:
         res = tg_request("getUpdates", {"offset": offset, "timeout": 25})
