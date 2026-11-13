@@ -1,404 +1,291 @@
-import json
 import os
-import sqlite3
-import subprocess
-import threading
-import time
-import urllib.parse
-import urllib.request
-from http.server import BaseHTTPRequestHandler, HTTPServer
 
-TOKEN = os.environ.get("BOT_TOKEN", "9288572880:AAHaa4ea7lKvmSA8A4OMr0OJSMfv6SrZt54")
-ADMIN_ID = int(os.environ.get("ADMIN_ID", "1021089367"))
-ADMIN_USERNAME = "@usman_khasan"
-API_URL = f"https://api.telegram.org/bot{TOKEN}/"
-PORT = int(os.environ.get("PORT", 8080))
+PROJECT_DIR = r"C:\Users\User\telegram"
+UP_MANAGER_PATH = os.path.join(
+    PROJECT_DIR, r"TMessagesProj\src\main\java\org\telegram\messenger\UpManager.java"
+)
 
-WORK_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.path.join(WORK_DIR, "up_ecosystem.db")
-JSON_MIRROR_PATH = os.path.join(WORK_DIR, "users_status.json")
+up_manager_code = """package org.telegram.messenger;
 
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-db_lock = threading.Lock()
+import android.app.AlertDialog;
+import android.content.Context;
+import android.content.SharedPreferences;
+import android.text.InputType;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.Toast;
+import org.json.JSONArray;
+import org.json.JSONObject;
+import org.telegram.messenger.browser.Browser;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.util.HashSet;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
-with db_lock:
-    cursor = conn.cursor()
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        is_premium INTEGER DEFAULT 0,
-        upstars INTEGER DEFAULT 0
-    )
-    """)
-    cursor.execute("""
-    CREATE TABLE IF NOT EXISTS modules (
-        user_id INTEGER,
-        module_name TEXT,
-        PRIMARY KEY (user_id, module_name)
-    )
-    """)
-    # Admin (1021089367) har doim VIP va 1000 UpStar balansda bo'lishini kafolatlash
-    cursor.execute("INSERT OR IGNORE INTO users (user_id, is_premium, upstars) VALUES (?, 1, 1000)", (ADMIN_ID,))
-    cursor.execute("UPDATE users SET is_premium = 1 WHERE user_id = ?", (ADMIN_ID,))
-    for m in ["GhostVault", "AIManager", "MeshNetwork", "MediaPaywall"]:
-        cursor.execute("INSERT OR IGNORE INTO modules (user_id, module_name) VALUES (?, ?)", (ADMIN_ID, m))
-    conn.commit()
+public class UpManager {
+    public static final String BOT_USERNAME = "messengeruppremium_bot";
+    public static String SERVER_IP = "http://87.192.242.81:8080";
+    public static final String GITHUB_SYNC_URL = "https://raw.githubusercontent.com/firuzabduloev24-web/universal-ish-va-tarjima-bot-/main/users_status.json";
 
-def sync_json_and_github():
-    """Android ilova 24/7 o'qiy olishi uchun bazani users_status.json ga eksport qiladi va GitHub'ga saqlaydi."""
-    try:
-        with db_lock:
-            cur = conn.cursor()
-            cur.execute("SELECT user_id, is_premium, upstars FROM users")
-            rows = cur.fetchall()
-            data = {}
-            for uid, prem, stars in rows:
-                cur.execute("SELECT module_name FROM modules WHERE user_id = ?", (uid,))
-                mods = [r[0] for r in cur.fetchall()]
-                data[str(uid)] = {
-                    "is_premium": bool(prem) or (len(mods) >= 4) or (uid == ADMIN_ID),
-                    "upstars": stars,
-                    "modules": mods
-                }
-        with open(JSON_MIRROR_PATH, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
+    public static boolean isUpPremium = true;
+    public static int upStarsBalance = 1000;
+    public static Set<String> activeModules = new HashSet<>();
+    public static Map<Long, Boolean> vipUsersCache = new ConcurrentHashMap<>();
+    public static Map<String, String> i18nCache = new ConcurrentHashMap<>();
 
-        # GitHub Actions ichida bo'lsa avtomatik commit & push qilish
-        if os.environ.get("GITHUB_ACTIONS") == "true":
-            threading.Thread(target=_bg_git_push, daemon=True).start()
-    except Exception:
-        pass
-
-def _bg_git_push():
-    try:
-        subprocess.run(["git", "config", "--global", "user.name", "UpPremium AutoSync"], cwd=WORK_DIR)
-        subprocess.run(["git", "config", "--global", "user.email", "actions@github.com"], cwd=WORK_DIR)
-        subprocess.run(["git", "add", "up_ecosystem.db", "users_status.json"], cwd=WORK_DIR)
-        subprocess.run(["git", "commit", "-m", "Auto-sync VIP status"], cwd=WORK_DIR)
-        subprocess.run(["git", "push", "origin", "main"], cwd=WORK_DIR)
-    except Exception:
-        pass
-
-def ensure_user(user_id, auto_vip=False):
-    with db_lock:
-        cur = conn.cursor()
-        cur.execute("SELECT is_premium FROM users WHERE user_id = ?", (user_id,))
-        row = cur.fetchone()
-        is_vip = 1 if (user_id == ADMIN_ID or auto_vip) else 0
-        if not row:
-            cur.execute("INSERT INTO users (user_id, is_premium, upstars) VALUES (?, ?, 0)", (user_id, is_vip))
-            conn.commit()
-        elif is_vip == 1 and row[0] == 0:
-            cur.execute("UPDATE users SET is_premium = 1 WHERE user_id = ?", (user_id,))
-            conn.commit()
-
-def get_user_data(user_id):
-    with db_lock:
-        cur = conn.cursor()
-        cur.execute("SELECT module_name FROM modules WHERE user_id = ?", (user_id,))
-        mods = [r[0] for r in cur.fetchall()]
-        cur.execute("SELECT is_premium, upstars FROM users WHERE user_id = ?", (user_id,))
-        row = cur.fetchone()
-        prem = bool(row[0]) if row else False
-        stars = row[1] if row else 0
-
-        # Agar Admin bo'lsa yoki 4/4 modul faol bo'lsa -> avtomatik UpPremium Faol!
-        if (user_id == ADMIN_ID or len(mods) >= 4) and not prem:
-            prem = True
-            cur.execute("UPDATE users SET is_premium = 1 WHERE user_id = ?", (user_id,))
-            conn.commit()
-
-        return (prem, stars, mods)
-
-def tg_request(method, payload=None):
-    url = API_URL + method
-    try:
-        if payload is not None:
-            data = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
-        else:
-            req = urllib.request.Request(url)
-        with urllib.request.urlopen(req, timeout=35) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-def send_message(chat_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    tg_request("sendMessage", payload)
-
-def edit_message(chat_id, message_id, text, reply_markup=None):
-    payload = {"chat_id": chat_id, "message_id": message_id, "text": text, "parse_mode": "Markdown"}
-    if reply_markup:
-        payload["reply_markup"] = reply_markup
-    tg_request("editMessageText", payload)
-
-def build_main_menu_kb(target_uid):
-    return {
-        "inline_keyboard": [
-            [{"text": "🇺🇿 Uzcard / Humo (O'zbekiston)", "callback_data": f"pay_uz_{target_uid}"}],
-            [{"text": "🌍 Visa (SUM / USD) (Xalqaro)", "callback_data": f"pay_visa_{target_uid}"}],
-            [{"text": "🚀 4 ta Maxsus Modulni Yoqish", "callback_data": "modules_menu"}],
-            [{"text": "🔄 Ilova bilan Sinxronlash (VIP Tekshirish)", "callback_data": f"sync_now_{target_uid}"}]
-        ]
+    public static String getAppLang() {
+        try {
+            String lc = LocaleController.getInstance().getCurrentLocaleInfo().getLangCode();
+            if (lc != null && lc.length() >= 2) return lc.split("_")[0].split("-")[0].toLowerCase();
+        } catch (Exception ignored) {}
+        return Locale.getDefault().getLanguage().toLowerCase();
     }
 
-def format_status_text(target_uid):
-    prem, stars, mods = get_user_data(target_uid)
-    status_text = "Faol ✅ (VIP)" if prem else "Faol emas ❌"
-    return (
-        f"🚀 *MessengerUP Rasmiy Boti*\n\n"
-        f"🆔 Sizning ID: `{target_uid}`\n"
-        f"💎 UpPremium: *{status_text}*\n"
-        f"✨ UpStar Balansi: *{stars}*\n"
-        f"🧩 Faol Modullar: *{len(mods)}/4 ta*\n\n"
-        f"Kerakli bo'limni tanlang:"
-    )
+    // 270 ta davlat tili uchun avtomatik keshli tarjimon (UZ, RU, EN + Google GTX 270 Countries)
+    public static String tr(String uz, String ru, String en) {
+        String l = getAppLang();
+        if (l.equals("uz")) return uz;
+        if (l.equals("ru") || l.equals("be") || l.equals("kk") || l.equals("ky") || l.equals("tg")) return ru;
+        if (l.equals("en")) return en;
 
-def handle_update(update):
-    if "message" in update:
-        msg = update["message"]
-        chat_id = msg["chat"]["id"]
-        user = msg.get("from", {})
-        user_id = user.get("id", chat_id)
-        text = msg.get("text", "")
+        String cacheKey = l + ":" + en;
+        if (i18nCache.containsKey(cacheKey)) {
+            return i18nCache.get(cacheKey);
+        }
 
-        # Telegramning o'zida Premium bo'lsa yoki Admin bo'lsa avto-aniqlash
-        tg_is_prem = bool(user.get("is_premium", False))
-        ensure_user(user_id, auto_vip=tg_is_prem)
-
-        if text.startswith("/start"):
-            parts = text.split(maxsplit=1)
-            args = parts[1] if len(parts) > 1 else ""
-            target_uid = user_id
-            app_vip = tg_is_prem
-
-            # Ilovadan ?start=pay_premium_1021089367_vip1 bo'lib kelganda avtomatik VIP yoqish
-            if "vip1" in args:
-                app_vip = True
-            if args.startswith("pay_"):
-                for token_part in args.split("_"):
-                    if token_part.isdigit() and len(token_part) >= 5:
-                        target_uid = int(token_part)
-
-            ensure_user(target_uid, auto_vip=app_vip)
-            sync_json_and_github()
-            send_message(chat_id, format_status_text(target_uid), build_main_menu_kb(target_uid))
-
-        elif text.startswith("/give_prem") and user_id == ADMIN_ID:
-            try:
-                target_id = int(text.split()[1])
-                ensure_user(target_id, auto_vip=True)
-                with db_lock:
-                    for m in ["GhostVault", "AIManager", "MeshNetwork", "MediaPaywall"]:
-                        conn.execute("INSERT OR IGNORE INTO modules (user_id, module_name) VALUES (?, ?)", (target_id, m))
-                    conn.commit()
-                sync_json_and_github()
-                send_message(chat_id, f"✅ `{target_id}` ga UpPremium va 4/4 modullar yoqildi!")
-                send_message(target_id, "🎉 Tabriklaymiz! Sizga *UpPremium (VIP)* va barcha 4 ta modul faollashtirildi!")
-            except Exception as e:
-                send_message(chat_id, f"Xato: ({e})")
-
-        elif text.startswith("/give_stars") and user_id == ADMIN_ID:
-            try:
-                parts = text.split()
-                target_id, amount = int(parts[1]), int(parts[2])
-                ensure_user(target_id)
-                with db_lock:
-                    conn.execute("UPDATE users SET upstars = upstars + ? WHERE user_id = ?", (amount, target_id))
-                    conn.commit()
-                sync_json_and_github()
-                send_message(chat_id, f"✅ `{target_id}` ga {amount} UpStar qo'shildi!")
-                send_message(target_id, f"✨ Hisobingizga *{amount} UpStar* qo'shildi!")
-            except Exception as e:
-                send_message(chat_id, f"Xato: ({e})")
-
-        elif "photo" in msg or "document" in msg:
-            username = f"@{user.get('username')}" if user.get("username") else "Mavjud emas"
-            full_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
-            caption = (
-                f"💰 *Yangi to'lov cheki keldi!*\n"
-                f"🆔 ID: `{user_id}`\n"
-                f"👤 Ism: {full_name} ({username})\n\n"
-                f"👇 *1-tugma bilan tasdiqlash:*"
-            )
-            admin_kb = {
-                "inline_keyboard": [
-                    [{"text": "💎 UpPremium (VIP) Yoqish", "callback_data": f"adm_prem_{user_id}"}],
-                    [
-                        {"text": "✨ +100 UpStar", "callback_data": f"adm_star_{user_id}_100"},
-                        {"text": "✨ +500 UpStar", "callback_data": f"adm_star_{user_id}_500"}
-                    ],
-                    [{"text": "❌ Chekni Rad Etish", "callback_data": f"adm_reject_{user_id}"}]
-                ]
+        try {
+            SharedPreferences prefs = ApplicationLoader.applicationContext.getSharedPreferences("up_i18n", Context.MODE_PRIVATE);
+            String saved = prefs.getString(cacheKey, null);
+            if (saved != null) {
+                i18nCache.put(cacheKey, saved);
+                return saved;
             }
-            if "photo" in msg:
-                tg_request("sendPhoto", {"chat_id": ADMIN_ID, "photo": msg["photo"][-1]["file_id"], "caption": caption, "parse_mode": "Markdown", "reply_markup": admin_kb})
-            elif "document" in msg:
-                tg_request("sendDocument", {"chat_id": ADMIN_ID, "document": msg["document"]["file_id"], "caption": caption, "parse_mode": "Markdown", "reply_markup": admin_kb})
-            send_message(chat_id, "✅ Chek adminga yuborildi! Tasdiqlanishi bilan sizga avtomatik VIP yonadi.")
+        } catch (Exception ignored) {}
 
-    elif "callback_query" in update:
-        call = update["callback_query"]
-        call_id = call["id"]
-        data = call.get("data", "")
-        user_id = call["from"]["id"]
-        chat_id = call["message"]["chat"]["id"]
-        message_id = call["message"]["message_id"]
+        // Orqa fonda foydalanuvchining interfeys tiliga avtomatik tarjima qilib keshga saqlaydi
+        new Thread(() -> {
+            try {
+                String q = URLEncoder.encode(en, "UTF-8");
+                URL url = new URL("https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl=" + l + "&dt=t&q=" + q);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0");
+                conn.setConnectTimeout(4000);
+                BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                StringBuilder sb = new StringBuilder();
+                String line;
+                while ((line = in.readLine()) != null) sb.append(line);
+                in.close();
 
-        tg_request("answerCallbackQuery", {"callback_query_id": call_id})
+                JSONArray outer = new JSONArray(sb.toString()).getJSONArray(0);
+                StringBuilder trBuilder = new StringBuilder();
+                for (int i = 0; i < outer.length(); i++) {
+                    JSONArray seg = outer.getJSONArray(i);
+                    if (!seg.isNull(0)) trBuilder.append(seg.getString(0));
+                }
+                String result = trBuilder.toString();
+                if (!result.isEmpty()) {
+                    i18nCache.put(cacheKey, result);
+                    SharedPreferences prefs = ApplicationLoader.applicationContext.getSharedPreferences("up_i18n", Context.MODE_PRIVATE);
+                    prefs.edit().putString(cacheKey, result).apply();
+                }
+            } catch (Exception ignored) {}
+        }).start();
 
-        if data.startswith("sync_now_"):
-            sync_json_and_github()
-            edit_message(chat_id, message_id, format_status_text(user_id), build_main_menu_kb(user_id))
+        return en;
+    }
 
-        elif data.startswith("pay_uz"):
-            msg_text = (
-                f"💳 *O'zbekiston kartalari orqali to'lov:*\n\n"
-                f"🔹 *Uzcard:* `5614682112210333`\n"
-                f"🔹 *Humo:* `9860170111318102`\n"
-                f"(Khasanov U.)\n\n"
-                f"• UpPremium (1 oy): 35,000 so'm\n"
-                f"• 100 UpStar: 15,000 so'm\n\n"
-                f"To'lovdan so'ng chekni shu botga yuboring! 📌\n"
-                f"🆔 Sizning ID: `{user_id}`"
-            )
-            kb = {"inline_keyboard": [[{"text": "⬅️ Orqaga", "callback_data": f"sync_now_{user_id}"}]]}
-            edit_message(chat_id, message_id, msg_text, kb)
+    public static void preloadInterfaceLanguage() {
+        String l = getAppLang();
+        if (l.equals("uz") || l.equals("ru") || l.equals("en")) return;
+        // Ilova ochilishi bilan foydalanuvchi tiliga barcha modul nomlarini oldindan tayyorlab qo'yadi
+        tr("", "", "Active ✅");
+        tr("", "", "💎 Manage UpPremium / UpStar (Bot)");
+        tr("", "", "🎁 Transfer UP Stars");
+        tr("", "", "🛡️ 1. Ghost Vault (Stealth Safe & Anti-Spy)");
+        tr("", "", "🤖 2. AI Manager (24/7 AI & Live Translator)");
+        tr("", "", "🌐 3. Mesh Network (Offline P2P & Mining)");
+        tr("", "", "💰 4. Media-Paywall (Paid Content)");
+        tr("", "", "Configure in Bot ⚙️");
+        tr("", "", "Close");
+    }
 
-        elif data.startswith("pay_visa"):
-            msg_text = (
-                f"🌍 *Xalqaro Visa kartalari orqali to'lov:*\n\n"
-                f"🔹 *Visa SUM:* `4023060506933828`\n"
-                f"🔹 *Visa USD:* `4023060246442007`\n"
-                f"(Khasanov U.)\n\n"
-                f"• UpPremium (1 oy): $3.00\n"
-                f"• 100 UpStar: $1.50\n\n"
-                f"To'lovdan so'ng chekni shu botga yuboring! 📌\n"
-                f"🆔 Sizning ID: `{user_id}`"
-            )
-            kb = {"inline_keyboard": [[{"text": "⬅️ Orqaga", "callback_data": f"sync_now_{user_id}"}]]}
-            edit_message(chat_id, message_id, msg_text, kb)
+    public static void openPayBot(Context context, String type) {
+        if (context == null) return;
+        preloadInterfaceLanguage();
+        long userId = UserConfig.getInstance(UserConfig.selectedAccount).getClientUserId();
+        String lang = getAppLang();
+        boolean hasVip = isUpPremium || (UserConfig.getInstance(UserConfig.selectedAccount).getCurrentUser() != null && UserConfig.getInstance(UserConfig.selectedAccount).getCurrentUser().premium);
+        String url = "https://t.me/" + BOT_USERNAME + "?start=pay_" + type + "_" + userId + (hasVip ? "_vip1" : "_vip0") + "_lang_" + lang;
 
-        elif data == "modules_menu":
-            prem, stars, mods = get_user_data(user_id)
-            kb = {
-                "inline_keyboard": [
-                    [{"text": "🛡️ Ghost Vault (" + ("Faol ✅" if "GhostVault" in mods else "Yoqish") + ")", "callback_data": "activ_GhostVault"}],
-                    [{"text": "🤖 AI Manager (" + ("Faol ✅" if "AIManager" in mods else "Yoqish") + ")", "callback_data": "activ_AIManager"}],
-                    [{"text": "🌐 Mesh Network (" + ("Faol ✅" if "MeshNetwork" in mods else "Yoqish") + ")", "callback_data": "activ_MeshNetwork"}],
-                    [{"text": "💰 Media-Paywall (" + ("Faol ✅" if "MediaPaywall" in mods else "Yoqish") + ")", "callback_data": "activ_MediaPaywall"}],
-                    [{"text": "⚡ Hammasini Yoqish (VIP Faollashtirish)", "callback_data": "activ_ALL"}],
-                    [{"text": "⬅️ Asosiy Menyu", "callback_data": f"sync_now_{user_id}"}]
-                ]
-            }
-            edit_message(chat_id, message_id, "🧩 *Sizning 4 ta maxsus modulingiz:*", kb)
+        String stOn = tr("Faol ✅", "Активен ✅", "Active ✅");
+        String[] items = {
+            tr("💎 UpPremium / UpStar Boshqaruvi (Bot)", "💎 Управление UpPremium / UpStar (Бот)", "💎 Manage UpPremium / UpStar (Bot)"),
+            tr("🎁 Do'stga UP Stars o'tkazish", "🎁 Перевести UP Stars другу", "🎁 Transfer UP Stars") + " (" + upStarsBalance + " ✨)",
+            tr("🛡️ 1. Ghost Vault (Maxfiy Seyf & Anti-Josus)", "🛡️ 1. Ghost Vault (Секретный Сейф)", "🛡️ 1. Ghost Vault (Stealth Safe & Anti-Spy)") + " [" + stOn + "]",
+            tr("🤖 2. AI Manager (24/7 AI & Tarjimon)", "🤖 2. AI Manager (24/7 ИИ & Переводчик)", "🤖 2. AI Manager (24/7 AI & Live Translator)") + " [" + stOn + "]",
+            tr("🌐 3. Mesh Network (Offline P2P & Mining)", "🌐 3. Mesh Network (Оффлайн P2P & Майнинг)", "🌐 3. Mesh Network (Offline P2P & Mining)") + " [" + stOn + "]",
+            tr("💰 4. Media-Paywall (Pullik Kontent)", "💰 4. Media-Paywall (Платный Контент)", "💰 4. Media-Paywall (Paid Content)") + " [" + stOn + "]"
+        };
 
-        elif data.startswith("activ_"):
-            mod_name = data.split("_")[1]
-            with db_lock:
-                if mod_name == "ALL":
-                    for m in ["GhostVault", "AIManager", "MeshNetwork", "MediaPaywall"]:
-                        conn.execute("INSERT OR IGNORE INTO modules (user_id, module_name) VALUES (?, ?)", (user_id, m))
-                    conn.execute("UPDATE users SET is_premium = 1 WHERE user_id = ?", (user_id,))
-                else:
-                    conn.execute("INSERT OR IGNORE INTO modules (user_id, module_name) VALUES (?, ?)", (user_id, mod_name))
-                conn.commit()
-            sync_json_and_github()
-            edit_message(chat_id, message_id, format_status_text(user_id), build_main_menu_kb(user_id))
+        new AlertDialog.Builder(context)
+            .setTitle("🚀 MessengerUP (" + upStarsBalance + " UpStar ✨)")
+            .setItems(items, (dialog, which) -> {
+                if (which == 0) {
+                    Browser.openUrl(context, url);
+                } else if (which == 1) {
+                    showTransferDialog(context, 0);
+                } else if (which == 2) {
+                    showModuleDetailDialog(context, "GhostVault", url);
+                } else if (which == 3) {
+                    showModuleDetailDialog(context, "AIManager", url);
+                } else if (which == 4) {
+                    showModuleDetailDialog(context, "MeshNetwork", url);
+                } else if (which == 5) {
+                    showModuleDetailDialog(context, "MediaPaywall", url);
+                }
+            })
+            .setPositiveButton(tr("Botда Sozlash ⚙️", "Настроить в Боте ⚙️", "Configure in Bot ⚙️"), (d, w) -> Browser.openUrl(context, url))
+            .setNegativeButton(tr("Yopish", "Закрыть", "Close"), null)
+            .show();
+    }
 
-        # ADMIN 1-CLICK TASDIQLASH TUGMALARI
-        elif data.startswith("adm_prem_") and user_id == ADMIN_ID:
-            target_id = int(data.split("_")[2])
-            ensure_user(target_id, auto_vip=True)
-            with db_lock:
-                for m in ["GhostVault", "AIManager", "MeshNetwork", "MediaPaywall"]:
-                    conn.execute("INSERT OR IGNORE INTO modules (user_id, module_name) VALUES (?, ?)", (target_id, m))
-                conn.commit()
-            sync_json_and_github()
-            send_message(chat_id, f"✅ `{target_id}` foydalanuvchiga *UpPremium (VIP)* yoqildi!")
-            send_message(target_id, "🎉 *To'lovingiz tasdiqlandi!*\n💎 Sizga *UpPremium (VIP)* va barcha 4/4 modullar faollashtirildi!")
+    public static void showModuleDetailDialog(Context context, String modKey, String botUrl) {
+        String title = "";
+        String msg = "";
+        if (modKey.equals("GhostVault")) {
+            title = tr("🛡️ Ghost Vault (Maxfiy Seyf)", "🛡️ Ghost Vault (Секретный Сейф)", "🛡️ Ghost Vault (Stealth Safe & Anti-Spy)");
+            msg = tr(
+                "• Anti-Skrinshot va ekran yozuvini bloklash: Faol ✅\\n• Decoy PIN (Yolg'on parol): Faol ✅\\n• Avto-o'chirish taymeri: 30s",
+                "• Блокировка скриншотов и записи экрана: Активна ✅\\n• Ложный пароль (Decoy PIN): Активен ✅\\n• Таймер авто-удаления: 30с",
+                "• Anti-Screenshot & Screen Recording: Active ✅\\n• Decoy PIN (Fake Safe Mode): Active ✅\\n• Self-Destruct Timer: 30s"
+            );
+        } else if (modKey.equals("AIManager")) {
+            title = tr("🤖 AI Manager (24/7 AI Kotib)", "🤖 AI Manager (24/7 ИИ-Секретарь)", "🤖 AI Manager (24/7 Personal AI Secretary)");
+            msg = tr(
+                "• 24/7 Aqlli AI Avto-Javob: Faol ✅\\n• 270 davlat tiliga sinxron chat tarjimoni: Faol ✅\\n• Ovozli xabarni matnga o'girish: Faol ✅",
+                "• 24/7 Умный ИИ-Автоответчик: Активен ✅\\n• Живой перевод чатов (270 стран): Активен ✅\\n• Расшифровка голосовых в текст: Активна ✅",
+                "• 24/7 Smart AI Auto-Reply: Active ✅\\n• Live Chat Translator (270 Countries): Active ✅\\n• Voice-to-Text Instant Summary: Active ✅"
+            );
+        } else if (modKey.equals("MeshNetwork")) {
+            title = tr("🌐 Mesh Network (Offline P2P)", "🌐 Mesh Network (Оффлайн P2P)", "🌐 Mesh Network (Offline P2P & Anti-Block)");
+            msg = tr(
+                "• Bluetooth / Wi-Fi Direct internetsiz aloqa: Faol ✅\\n• Stealth DPI Anti-Blokirovka: Faol ✅\\n• Relay Mining bonus: +15 UpStar ✨",
+                "• Оффлайн связь Bluetooth / Wi-Fi Direct: Активна ✅\\n• Обход блокировок Stealth DPI: Активен ✅\\n• Бонус за раздачу сети: +15 UpStar ✨",
+                "• Offline Bluetooth / Wi-Fi Direct Bridge: Active ✅\\n• Stealth DPI Firewall Bypass: Active ✅\\n• Relay Mining Reward: +15 UpStar ✨"
+            );
+        } else {
+            title = tr("💰 Media-Paywall (Monetizatsiya)", "💰 Media-Paywall (Монетизация)", "💰 Media-Paywall (Content Monetization)");
+            msg = tr(
+                "• Rasm va videolarni UpStar evaziga sotish: Faol ✅\\n• Standart ochish narxi: 25 UpStar\\n• Muallif ulushi: 80%",
+                "• Продажа фото и видео за UpStar: Активна ✅\\n• Цена открытия по умолчанию: 25 UpStar\\n• Доля автора: 80%",
+                "• Sell photos & videos for UpStars: Active ✅\\n• Default unlock price: 25 UpStar\\n• Creator revenue share: 80%"
+            );
+        }
 
-        elif data.startswith("adm_star_") and user_id == ADMIN_ID:
-            parts = data.split("_")
-            target_id, amount = int(parts[2]), int(parts[3])
-            ensure_user(target_id)
-            with db_lock:
-                conn.execute("UPDATE users SET upstars = upstars + ? WHERE user_id = ?", (amount, target_id))
-                conn.commit()
-            sync_json_and_github()
-            send_message(chat_id, f"✅ `{target_id}` ga *{amount} UpStar* qo'shildi!")
-            send_message(target_id, f"🎉 *To'lovingiz tasdiqlandi!*\n✨ Hisobingizga *{amount} UpStar* qo'shildi!")
+        new AlertDialog.Builder(context)
+            .setTitle(title)
+            .setMessage(msg)
+            .setPositiveButton(tr("Botda Sozlash ⚙️", "Настроить в Боте ⚙️", "Configure in Bot ⚙️"), (d, w) -> Browser.openUrl(context, botUrl))
+            .setNegativeButton(tr("Orqaga", "Назад", "Back"), (d, w) -> openPayBot(context, "modules"))
+            .show();
+    }
 
-        elif data.startswith("adm_reject_") and user_id == ADMIN_ID:
-            target_id = int(data.split("_")[2])
-            send_message(chat_id, f"❌ `{target_id}` cheki rad etildi.")
-            send_message(target_id, "⚠️ Yuborgan to'lov chekingiz tasdiqlanmadi. Qaytadan tekshirib yuboring yoki adminga murojaat qiling.")
+    public static void showTransferDialog(Context context, long defaultTargetId) {
+        if (context == null) return;
+        LinearLayout layout = new LinearLayout(context);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setPadding(50, 30, 50, 10);
 
-class APIServer(BaseHTTPRequestHandler):
-    def do_GET(self):
-        parsed = urllib.parse.urlparse(self.path)
-        params = urllib.parse.parse_qs(parsed.query)
-        try:
-            uid = int(params.get("user_id", ["0"])[0])
-        except ValueError:
-            uid = 0
+        EditText idInput = new EditText(context);
+        idInput.setHint(tr("Qabul qiluvchi ID raqami", "ID получателя", "Recipient Telegram ID"));
+        idInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        if (defaultTargetId > 0) idInput.setText(String.valueOf(defaultTargetId));
+        layout.addView(idInput);
 
-        if parsed.path == "/":
-            body = json.dumps({"status": "MessengerUP 24/7 Server Active"}).encode("utf-8")
-        elif parsed.path == "/status":
-            prem, stars, mods = get_user_data(uid)
-            body = json.dumps({"is_premium": prem, "upstars": stars, "modules": mods}).encode("utf-8")
-        elif parsed.path == "/transfer":
-            try:
-                from_id = int(params.get("from_id", ["0"])[0])
-                to_id = int(params.get("to_id", ["0"])[0])
-                amount = int(params.get("amount", ["0"])[0])
-            except ValueError:
-                from_id, to_id, amount = 0, 0, 0
-            ensure_user(from_id)
-            ensure_user(to_id)
-            _, sender_stars, _ = get_user_data(from_id)
-            if amount > 0 and sender_stars >= amount:
-                with db_lock:
-                    conn.execute("UPDATE users SET upstars = upstars - ? WHERE user_id = ?", (amount, from_id))
-                    conn.execute("UPDATE users SET upstars = upstars + ? WHERE user_id = ?", (amount, to_id))
-                    conn.commit()
-                sync_json_and_github()
-                send_message(to_id, f"🎁 Sizga `{from_id}` foydalanuvchidan *{amount} UP Stars* o'tkazildi!")
-                body = json.dumps({"ok": True, "new_balance": sender_stars - amount}).encode("utf-8")
-            else:
-                body = json.dumps({"ok": False, "error": "Balans yetarli emas"}).encode("utf-8")
-        elif parsed.path == "/modules":
-            _, _, mods = get_user_data(uid)
-            body = json.dumps({"modules": mods}).encode("utf-8")
-        else:
-            self.send_response(404)
-            self.end_headers()
-            return
+        EditText amountInput = new EditText(context);
+        amountInput.setHint(tr("Miqdor (Masalan: 100)", "Количество (Например: 100)", "Amount (e.g. 100)"));
+        amountInput.setInputType(InputType.TYPE_CLASS_NUMBER);
+        layout.addView(amountInput);
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(body)
+        new AlertDialog.Builder(context)
+            .setTitle(tr("🎁 UP Stars o'tkazish", "🎁 Перевод UP Stars", "🎁 Transfer UP Stars"))
+            .setView(layout)
+            .setPositiveButton(tr("Jo'natish", "Отправить", "Send"), (d, w) -> {
+                try {
+                    long toId = Long.parseLong(idInput.getText().toString().trim());
+                    int amount = Integer.parseInt(amountInput.getText().toString().trim());
+                    transferStars(context, toId, amount);
+                } catch (Exception e) {
+                    Toast.makeText(context, "Invalid ID / Amount", Toast.LENGTH_SHORT).show();
+                }
+            })
+            .setNegativeButton(tr("Bekor qilish", "Отмена", "Cancel"), null)
+            .show();
+    }
 
-    def log_message(self, format, *args):
-        pass
+    public static void transferStars(Context context, long toId, int amount) {
+        long fromId = UserConfig.getInstance(UserConfig.selectedAccount).getClientUserId();
+        new Thread(() -> {
+            try {
+                URL url = new URL(SERVER_IP + "/transfer?from_id=" + fromId + "&to_id=" + toId + "&amount=" + amount);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(5000);
+                BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                StringBuilder resp = new StringBuilder();
+                String line;
+                while ((line = in.readLine()) != null) resp.append(line);
+                in.close();
+                JSONObject json = new JSONObject(resp.toString());
+                if (json.optBoolean("ok", false)) {
+                    upStarsBalance = json.optInt("new_balance", upStarsBalance - amount);
+                    AndroidUtilities.runOnUIThread(() -> Toast.makeText(context, "✅ +" + amount + " UP Stars!", Toast.LENGTH_LONG).show());
+                }
+            } catch (Exception ignored) {}
+        }).start();
+    }
 
-if __name__ == "__main__":
-    sync_json_and_github()
-    tg_request("deleteWebhook")
-    threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), APIServer).serve_forever(), daemon=True).start()
-    print(f"✅ MessengerUP Server {PORT}-portda 24/7 rejimda ishga tushdi!")
-    offset = 0
-    while True:
-        res = tg_request("getUpdates", {"offset": offset, "timeout": 25})
-        if res.get("ok"):
-            for upd in res.get("result", []):
-                offset = upd["update_id"] + 1
-                handle_update(upd)
-        else:
-            time.sleep(2)
+    public static boolean isUserUpVip(long userId) {
+        if (userId == UserConfig.getInstance(UserConfig.selectedAccount).getClientUserId()) return isUpPremium;
+        return Boolean.TRUE.equals(vipUsersCache.getOrDefault(userId, false));
+    }
+
+    public static void checkUserStatus() {
+        preloadInterfaceLanguage();
+        long userId = UserConfig.getInstance(UserConfig.selectedAccount).getClientUserId();
+        if (userId == 0) return;
+
+        new Thread(() -> {
+            try {
+                URL url = new URL(GITHUB_SYNC_URL);
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("GET");
+                conn.setConnectTimeout(5000);
+                BufferedReader in = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                StringBuilder response = new StringBuilder();
+                String line;
+                while ((line = in.readLine()) != null) response.append(line);
+                in.close();
+
+                JSONObject allUsers = new JSONObject(response.toString());
+                JSONObject u = allUsers.optJSONObject(String.valueOf(userId));
+                if (u != null) {
+                    isUpPremium = u.optBoolean("is_premium", true);
+                    upStarsBalance = u.optInt("upstars", 1000);
+                }
+            } catch (Exception ignored) {}
+        }).start();
+    }
+}
+"""
+
+with open(UP_MANAGER_PATH, "w", encoding="utf-8") as f:
+    f.write(up_manager_code)
+
+print("✅ UpManager.java 270 ta davlat interfeys tiliga avto-moslashadigan qilib yangilandi!")
