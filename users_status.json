@@ -10,8 +10,13 @@
     ]
   },
   "7602427933": {
-    "is_premium": false,
+    "is_premium": true,
     "upstars": 0,
-    "modules": []
+    "modules": [
+      "AIManager",
+      "GhostVault",
+      "MediaPaywall",
+      "MeshNetwork"
+    ]
   }
 }
