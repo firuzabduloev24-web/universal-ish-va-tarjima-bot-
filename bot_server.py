@@ -1,7 +1,9 @@
+import hashlib
 import json
 import os
+import random
+import re
 import sqlite3
-import subprocess
 import threading
 import time
 import urllib.parse
@@ -11,6 +13,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 TOKEN = os.environ.get("BOT_TOKEN", "9288572880:AAHaa4ea7lKvmSA8A4OMr0OJSMfv6SrZt54")
 ADMIN_ID = int(os.environ.get("ADMIN_ID", "1021089367"))
 ADMIN_USERNAME = "@usman_khasan"
+SMS_SECRET = os.environ.get("SMS_SECRET", "khasanov_auto_pay_2026")
+CRYPTO_PAY_TOKEN = os.environ.get("CRYPTO_PAY_TOKEN", "")  # @CryptoBot API token (ixtiyoriy)
 API_URL = f"https://api.telegram.org/bot{TOKEN}/"
 PORT = int(os.environ.get("PORT", 8080))
 
@@ -18,8 +22,42 @@ WORK_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(WORK_DIR, "up_ecosystem.db")
 JSON_MIRROR_PATH = os.path.join(WORK_DIR, "users_status.json")
 
-conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-db_lock = threading.Lock()
+# ==============================================================================
+# MESSENGER UP ILOVASI BILAN 1:1 SINXRON TARIFLAR (ASOSIY NARX SONDA HAM BERILGAN)
+# ==============================================================================
+PREMIUM_PACKAGES = {
+    "prem_monthly": {
+        "months": 1,
+        "title_uz": "💎 UP Premium — 1 Oylik (Monthly)",
+        "title_ru": "💎 UP Premium — 1 Месяц (Monthly)",
+        "title_en": "💎 UP Premium — Monthly (1 Month)",
+        "base_uzs": 35990,
+        "base_usd": 2.99,
+        "uzs": "35 990,00 so'm",
+        "usd": "$2.99"
+    },
+    "prem_annual": {
+        "months": 12,
+        "title_uz": "💎 UP Premium — 1 Yillik (Annual -37%)",
+        "title_ru": "💎 UP Premium — 1 Год (Annual -37%)",
+        "title_en": "💎 UP Premium — Annual (-37% | 1 Year)",
+        "base_uzs": 269990,
+        "base_usd": 21.99,
+        "uzs": "269 990,00 so'm",
+        "usd": "$21.99"
+    }
+}
+
+STAR_PACKAGES = {
+    "stars_100":    {"stars": 100,    "label": "100 Stars",     "base_uzs": 25399,    "base_usd": 1.99,    "uzs": "25 399,00 so'm",     "usd": "$1.99"},
+    "stars_250":    {"stars": 250,    "label": "250 Stars",     "base_uzs": 59999,    "base_usd": 4.79,    "uzs": "59 999,00 so'm",     "usd": "$4.79"},
+    "stars_500":    {"stars": 500,    "label": "500 Stars",     "base_uzs": 117999,   "base_usd": 9.49,    "uzs": "117 999,00 so'm",    "usd": "$9.49"},
+    "stars_1000":   {"stars": 1000,   "label": "1 000 Stars",   "base_uzs": 233999,   "base_usd": 18.99,   "uzs": "233 999,00 so'm",    "usd": "$18.99"},
+    "stars_2500":   {"stars": 2500,   "label": "2 500 Stars",   "base_uzs": 579999,   "base_usd": 45.99,   "uzs": "579 999,00 so'm",    "usd": "$45.99"},
+    "stars_10000":  {"stars": 10000,  "label": "10 000 Stars",  "base_uzs": 2299999,  "base_usd": 179.99,  "uzs": "2 299 999,00 so'm",  "usd": "$179.99"},
+    "stars_50000":  {"stars": 50000,  "label": "50 000 Stars",  "base_uzs": 11599999, "base_usd": 899.99,  "uzs": "11 599 999,00 so'm", "usd": "$899.99"},
+    "stars_150000": {"stars": 150000, "label": "150 000 Stars", "base_uzs": 34999999, "base_usd": 2699.99, "uzs": "34 999 999,00 so'm", "usd": "$2,699.99"}
+}
 
 DEFAULT_MOD_CONFIG = {
     "GhostVault": {"enabled": True, "anti_screenshot": True, "decoy_pin": True, "timer": "30s"},
@@ -27,6 +65,9 @@ DEFAULT_MOD_CONFIG = {
     "MeshNetwork": {"enabled": True, "p2p_bridge": True, "stealth_dpi": True, "mined_stars": 15},
     "MediaPaywall": {"enabled": True, "default_price": 25, "earned_stars": 0, "sales_count": 0}
 }
+
+conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+db_lock = threading.Lock()
 
 with db_lock:
     cursor = conn.cursor()
@@ -36,7 +77,8 @@ with db_lock:
         is_premium INTEGER DEFAULT 0,
         upstars INTEGER DEFAULT 0,
         lang TEXT DEFAULT 'en',
-        mod_config TEXT DEFAULT '{}'
+        mod_config TEXT DEFAULT '{}',
+        pending_pkg TEXT DEFAULT 'prem_monthly'
     )
     """)
     cursor.execute("""
@@ -44,6 +86,25 @@ with db_lock:
         user_id INTEGER,
         module_name TEXT,
         PRIMARY KEY (user_id, module_name)
+    )
+    """)
+    # AVTO-TO'LOV BUYURTMALAR JADVALI (Dinamik noyob summa va navbat uchun)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS payment_orders (
+        order_id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER,
+        pkg_key TEXT,
+        unique_uzs INTEGER,
+        status TEXT DEFAULT 'pending',
+        created_at INTEGER
+    )
+    """)
+    # ANTI-DUBLIKAT CHEKLAR JADVALI (Bitta chekni 2 marta tashlashni bloklaydi)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS used_receipts (
+        file_hash TEXT PRIMARY KEY,
+        user_id INTEGER,
+        used_at INTEGER
     )
     """)
     cursor.execute("""
@@ -56,7 +117,8 @@ with db_lock:
     """)
     for col_sql in [
         "ALTER TABLE users ADD COLUMN lang TEXT DEFAULT 'en'",
-        "ALTER TABLE users ADD COLUMN mod_config TEXT DEFAULT '{}'"
+        "ALTER TABLE users ADD COLUMN mod_config TEXT DEFAULT '{}'",
+        "ALTER TABLE users ADD COLUMN pending_pkg TEXT DEFAULT 'prem_monthly'"
     ]:
         try:
             cursor.execute(col_sql)
@@ -64,7 +126,7 @@ with db_lock:
             pass
 
     cursor.execute(
-        "INSERT OR IGNORE INTO users (user_id, is_premium, upstars, lang, mod_config) VALUES (?, 1, 1000, 'uz', ?)",
+        "INSERT OR IGNORE INTO users (user_id, is_premium, upstars, lang, mod_config, pending_pkg) VALUES (?, 1, 1000, 'uz', ?, 'prem_annual')",
         (ADMIN_ID, json.dumps(DEFAULT_MOD_CONFIG))
     )
     cursor.execute("UPDATE users SET is_premium = 1 WHERE user_id = ?", (ADMIN_ID,))
@@ -72,180 +134,94 @@ with db_lock:
         cursor.execute("INSERT OR IGNORE INTO modules (user_id, module_name) VALUES (?, ?)", (ADMIN_ID, m))
     conn.commit()
 
-# ==============================================================================
-# 270 TA DAVLAT UCHUN TO'LIQ LUG'AT VA GOOGLE GTX AVTO-TARJIMON
-# (Modullarning har bitta tugmasi, ichki yozuvi va bildirishnomalari bilan)
-# ==============================================================================
 CORE_STRINGS = {
     "en": {
-        "title": "🚀 *MessengerUP Global Ecosystem*",
+        "title": "🚀 *MessengerUP Official Payment & Ecosystem Bot*",
         "your_id": "🆔 Your ID:",
-        "vip_status": "💎 UpPremium:",
+        "vip_status": "💎 UP Premium:",
         "active": "Active ✅ (VIP)",
         "inactive": "Inactive ❌",
-        "balance": "✨ UpStar Balance:",
+        "balance": "✨ UP Stars Balance:",
         "active_mods": "🧩 Active Modules:",
-        "choose": "Select a section below:",
-        "btn_uz_pay": "💳 Local Cards (Uzcard / Humo)",
-        "btn_int_pay": "🌍 Global Payment (Visa / Mastercard / USDT)",
+        "choose": "Select a package or section below:",
+        "btn_buy_prem": "💎 Buy UP Premium (Monthly / Annual -37%)",
+        "btn_buy_stars": "✨ Buy UP Stars (100 — 150,000 Packages)",
         "btn_mods": "🧩 4 Special Modules (Live Control Center)",
         "btn_lang": "🌐 Language",
         "btn_sync": "🔄 Sync with App",
         "btn_back": "⬅️ Back",
-        "select_lang": "🌐 *Select your interface language (270 Countries Supported):*",
-        "mod_hub_title": "🧩 *4 Special Modules Control Center*\nTap any module below to test its live features and configure settings in your language:",
-        "mod_btn_1": "🛡️ 1. Ghost Vault (Stealth Safe & Anti-Spy) ⚙️",
-        "mod_btn_2": "🤖 2. AI Manager (24/7 AI Secretary) ⚙️",
-        "mod_btn_3": "🌐 3. Mesh Network (Offline P2P & Mining) ⚙️",
-        "mod_btn_4": "💰 4. Media-Paywall (Content Monetization) ⚙️",
-        "status_label": "Status",
-        "ghost_title": "🛡️ *Ghost Vault (Stealth Safe & Anti-Spy)*",
-        "ghost_info": "Protects private chats with dual-PIN encryption and blocks unauthorized screenshots or screen recording.",
-        "ghost_btn_anti": "📵 Anti-Screenshot & Screen Record",
-        "ghost_btn_decoy": "🔐 Decoy PIN (Fake Safe Mode)",
-        "ghost_btn_timer": "⏱ Auto-Delete Timer",
-        "ai_title": "🤖 *AI Manager (24/7 Personal AI Secretary)*",
-        "ai_info": "Automatically replies when you are busy, summarizes voice notes, and translates chats across 270 countries in real time.",
-        "ai_btn_reply": "💬 24/7 Smart AI Auto-Reply",
-        "ai_btn_tr": "🌍 Live Chat Translator (270 Countries)",
-        "ai_btn_voice": "🎙 Voice-to-Text Instant Summary",
-        "mesh_title": "🌐 *Mesh Network (Offline P2P & Anti-Block)*",
-        "mesh_info": "Transmits messages without internet via nearby Bluetooth/Wi-Fi Direct nodes, bypasses firewalls, and rewards you with UpStars.",
-        "mesh_btn_p2p": "📡 Offline P2P Bridge (Bluetooth/Wi-Fi)",
-        "mesh_btn_dpi": "⚡ Stealth DPI Anti-Block Proxy",
-        "mesh_btn_mine": "⛏ Claim Relay Mining Reward (+5 UpStar ✨)",
-        "mesh_mined_label": "Mined Relay Bonus",
-        "paywall_title": "💰 *Media-Paywall (Content Monetization)*",
-        "paywall_info": "Locks your photos, videos, and files behind a blurred UpStar paywall. You receive 80% of all sales directly to your balance.",
-        "paywall_btn_price": "🏷 Default Unlock Price",
-        "paywall_btn_demo": "🔗 Generate Paid Media Link",
-        "paywall_sales_label": "Total Sales",
-        "paywall_earned_label": "Total Earned",
-        "paywall_demo_msg": "💰 *Paid Media Link Generated!*\n\n🔒 Unlock Price: *{price} UpStar*\n🔗 Shareable Link: `{link}`\n\n_Share this link in any chat or channel. Users must pay {price} UpStars to unlock your content!_",
-        "pay_uz_text": "💳 *Local Card Payment (Uzcard / Humo):*\n\n🔹 *Uzcard:* `5614682112210333`\n🔹 *Humo:* `9860170111318102`\n(Khasanov U.)\n\n• UpPremium (1 month): 35,000 UZS\n• 100 UpStar: 15,000 UZS\n\n📌 Send your payment screenshot here after transfer!\n🆔 Your ID: `{uid}`",
-        "pay_int_text": "🌍 *Global Payment (Visa / Mastercard / USDT):*\n\n🔹 *Visa USD:* `4023060246442007`\n🔹 *Visa Local:* `4023060506933828`\n(Khasanov U.)\n\n• UpPremium (1 month): $3.00\n• 100 UpStar: $1.50\n\n📌 Send your payment receipt screenshot right here to activate instantly!\n🆔 Your ID: `{uid}`",
-        "receipt_sent": "✅ Your payment receipt has been sent to the administrator! Your VIP / UpStars will be activated shortly.",
-        "alert_synced": "✅ Synchronized with app!",
-        "alert_updated": "✅ Setting updated!",
-        "alert_mined": "🎉 +5 UpStars added to your balance!",
-        "alert_link_ready": "🔗 Paid Media Link generated!",
-        "vip_activated_msg": "🎉 *Congratulations!* Your *UpPremium (VIP)* and all 4/4 special modules are now active!",
-        "stars_added_msg": "✨ *+{amount} UpStars* have been added to your balance!"
+        "btn_check_auto": "⚡ Check Payment Automatically",
+        "prem_menu_title": "💎 *UP Premium Subscription*\nGo beyond the limits and unlock exclusive features:\n\n• *Annual (-37%):* `269 990,00 so'm/year` (`$21.99`)\n• *Monthly:* `35 990,00 so'm/month` (`$2.99`)\n\nSelect your plan:",
+        "stars_menu_title": "✨ *UP Stars — Choose Package*\nSelect the amount of UP Stars you want to purchase:",
+        "invoice_title": "🧾 *Order #{order_id}:*",
+        "invoice_exact_uzs": "⚡ *EXACT Auto-Pay Amount (UZS):*",
+        "invoice_usd": "🌍 *International Price (USD):*",
+        "invoice_cards": "💳 *Payment Details (Khasanov U.):*\n🔹 *Uzcard:* `5614682112210333`\n🔹 *Humo:* `9860170111318102`\n🔹 *Visa Local (UZS):* `4023060506933828`\n🔹 *Visa Global (USD):* `4023060246442007`\n\n🤖 *AUTO-VERIFICATION:* Transfer the *exact UZS amount* shown above (`{exact_uzs} so'm`) for instant 1-second activation, OR send your receipt screenshot here!",
+        "receipt_sent": "✅ Receipt verified (Unique Check: OK) and queued! Your package will be activated shortly.",
+        "dup_receipt": "❌ *Error:* This payment receipt has already been used! Please send a valid new receipt.",
+        "vip_activated_msg": "🎉 *Congratulations!* Your *UP Premium (VIP)* and all 4/4 special modules have been activated automatically!",
+        "stars_added_msg": "✨ *+{amount} UP Stars* have been added to your balance!",
+        "mod_hub_title": "🧩 *4 Special Modules Control Center*\nTap any module below to configure settings:"
     },
     "uz": {
-        "title": "🚀 *MessengerUP Global Ekotizimi*",
+        "title": "🚀 *MessengerUP Rasmiy Avto-To'lov va Ekotizim Boti*",
         "your_id": "🆔 Sizning ID:",
-        "vip_status": "💎 UpPremium:",
+        "vip_status": "💎 UP Premium:",
         "active": "Faol ✅ (VIP)",
         "inactive": "Faol emas ❌",
-        "balance": "✨ UpStar Balansi:",
+        "balance": "✨ UP Stars Balansi:",
         "active_mods": "🧩 Faol Modullar:",
-        "choose": "Kerakli bo'limni tanlang:",
-        "btn_uz_pay": "🇺🇿 Uzcard / Humo (O'zbekiston)",
-        "btn_int_pay": "🌍 Visa / Mastercard / USDT (Xalqaro)",
-        "btn_mods": "🧩 4 ta Maxsus Modul (Boshqaruv va Demo)",
+        "choose": "Kerakli paket yoki bo'limni tanlang:",
+        "btn_buy_prem": "💎 UP Premium Xarid Qilish (Oylik / Yillik -37%)",
+        "btn_buy_stars": "✨ UP Stars Paketlari (100 — 150 000 Stars)",
+        "btn_mods": "🧩 4 ta Maxsus Modul (Boshqaruv Markazi)",
         "btn_lang": "🌐 Til / Language",
         "btn_sync": "🔄 Ilova bilan Sinxronlash",
         "btn_back": "⬅️ Orqaga",
-        "select_lang": "🌐 *Interfeys tilini tanlang (270 ta davlat qo'llab-quvvatlanadi):*",
-        "mod_hub_title": "🧩 *4 ta Maxsus Modul Boshqaruv Markazi*\nHar bir modulning ustiga bosib, uning jonli funksiyalarini o'z tilingizda boshqaring:",
-        "mod_btn_1": "🛡️ 1. Ghost Vault (Maxfiy Seyf va Anti-Josus) ⚙️",
-        "mod_btn_2": "🤖 2. AI Manager (24/7 Shaxsiy AI Kotib) ⚙️",
-        "mod_btn_3": "🌐 3. Mesh Network (Internetsiz P2P va Mining) ⚙️",
-        "mod_btn_4": "💰 4. Media-Paywall (Pullik Kontent Sotish) ⚙️",
-        "status_label": "Holat",
-        "ghost_title": "🛡️ *Ghost Vault (Maxfiy Seyf va Anti-Josus)*",
-        "ghost_info": "Shaxsiy yozishmalarni ikki qavatli yashirin parol bilan himoyalaydi hamda skrinshot va ekran yozib olishni bloklaydi.",
-        "ghost_btn_anti": "📵 Anti-Skrinshot va Yozib olishni bloklash",
-        "ghost_btn_decoy": "🔐 Yolg'on Parol (Decoy PIN)",
-        "ghost_btn_timer": "⏱ Avto-O'chirish Taymeri",
-        "ai_title": "🤖 *AI Manager (24/7 Shaxsiy AI Kotib)*",
-        "ai_info": "Band paytingizda mijozlarga o'zi javob yozadi, ovozli xabarlarni matnga o'giradi va 270 ta davlat tiliga sinxron tarjima qiladi.",
-        "ai_btn_reply": "💬 24/7 Aqlli AI Avto-Javob",
-        "ai_btn_tr": "🌍 Jonli Chat Tarjimon (270 Davlat)",
-        "ai_btn_voice": "🎙 Ovozli Xabarni Matnga Aylantirish",
-        "mesh_title": "🌐 *Mesh Network (Internetsiz P2P va Anti-Blok)*",
-        "mesh_info": "Internet yo'qligida Bluetooth/Wi-Fi Direct orqali xabar uzatadi, blokirovkalarni aylanib o'tadi va tarmoq ulashganingiz uchun UpStar beradi.",
-        "mesh_btn_p2p": "📡 Offline P2P Ko'prik (Bluetooth/Wi-Fi)",
-        "mesh_btn_dpi": "⚡ Stealth DPI Anti-Blokirovka",
-        "mesh_btn_mine": "⛏ Relay Bonus Olish (+5 UpStar ✨)",
-        "mesh_mined_label": "Yig'ilgan Relay Bonusi",
-        "paywall_title": "💰 *Media-Paywall (Kontentni Monetizatsiya Qilish)*",
-        "paywall_info": "Rasm, video va fayllarni xiralashtirib (Blur), faqat UpStar to'laganlarga ochib beradi. Tushumning 80% ulushi sizning balansingizga tushadi.",
-        "paywall_btn_price": "🏷 Standart Ochish Narxi",
-        "paywall_btn_demo": "🔗 Pullik Media Ssilka Yaratish",
-        "paywall_sales_label": "Sotuvlar soni",
-        "paywall_earned_label": "Jami daromad",
-        "paywall_demo_msg": "💰 *Pullik Media Ssilka Tayyor!*\n\n🔒 Ochish narxi: *{price} UpStar*\n🔗 Maxfiy ssilka: `{link}`\n\n_Ushbu ssilkani guruh yoki kanalga tashlang — foydalanuvchilar faylni ko'rish uchun sizga {price} UpStar to'laydi!_",
-        "pay_uz_text": "💳 *O'zbekiston kartalari orqali to'lov:*\n\n🔹 *Uzcard:* `5614682112210333`\n🔹 *Humo:* `9860170111318102`\n(Khasanov U.)\n\n• UpPremium (1 oy): 35,000 so'm\n• 100 UpStar: 15,000 so'm\n\n📌 To'lovdan so'ng chekni shu botga yuboring!\n🆔 Sizning ID: `{uid}`",
-        "pay_int_text": "🌍 *Xalqaro Visa / Mastercard orqali to'lov:*\n\n🔹 *Visa USD:* `4023060246442007`\n🔹 *Visa SUM:* `4023060506933828`\n(Khasanov U.)\n\n• UpPremium (1 oy): $3.00\n• 100 UpStar: $1.50\n\n📌 To'lovdan so'ng chekni shu botga yuboring!\n🆔 Sizning ID: `{uid}`",
-        "receipt_sent": "✅ To'lov cheki adminga yuborildi! Tasdiqlanishi bilan sizga avtomatik VIP / UpStar yoqiladi.",
-        "alert_synced": "✅ Ilova bilan sinxronlandi!",
-        "alert_updated": "✅ Sozlama yangilandi!",
-        "alert_mined": "🎉 +5 UpStar balansingizga qo'shildi!",
-        "alert_link_ready": "🔗 Pullik ssilka yaratildi!",
-        "vip_activated_msg": "🎉 *Tabriklaymiz!* Sizga *UpPremium (VIP)* va barcha 4/4 maxsus modullar faollashtirildi!",
-        "stars_added_msg": "✨ Hisobingizga *+{amount} UpStar* qo'shildi!"
+        "btn_check_auto": "⚡ To'lovni Avto-Tekshirish",
+        "prem_menu_title": "💎 *UP Premium Obunasi*\nCheklovlarsiz barcha eksklyuziv funksiyalarni yoqing:\n\n• *Annual (Yillik -37%):* `269 990,00 so'm/yil` (`$21.99`)\n• *Monthly (Oylik):* `35 990,00 so'm/oy` (`$2.99`)\n\nKerakli tarifni tanlang:",
+        "stars_menu_title": "✨ *UP Stars — Paketni tanlang*\nXarid qilmoqchi bo'lgan UP Stars paketingizni bosing:",
+        "invoice_title": "🧾 *Buyurtma #{order_id}:*",
+        "invoice_exact_uzs": "⚡ *AVTO-TASDIQLASH UCHUN ANIQ SUMMA:*",
+        "invoice_usd": "🌍 *Xalqaro to'lov (USD):*",
+        "invoice_cards": "💳 *To'lov rekvizitlari (Khasanov U.):*\n🔹 *Uzcard:* `5614682112210333`\n🔹 *Humo:* `9860170111318102`\n🔹 *Visa SUM:* `4023060506933828`\n🔹 *Visa USD:* `4023060246442007`\n\n🤖 *1-SONIYADA AVTO-YOQISH:* Kartaga aynan yuqoridagi *noyob summani* (`{exact_uzs} so'm`) o'tkazing (tizim SMS orqali avtomatik taniydi) YOKI to'lov chekini shu yerga tashlang!",
+        "receipt_sent": "✅ Chek haqiqiyligi tekshirildi (Dublikat emas: OK) va navbatga qo'shildi! Hozir faollashtiriladi.",
+        "dup_receipt": "❌ *Diqqat!* Bu to'lov cheki avval ishlatilgan! Iltimos, haqiqiy yangi to'lov chekini yuboring.",
+        "vip_activated_msg": "🎉 *Tabriklaymiz!* Sizga *UP Premium (VIP)* va barcha 4/4 maxsus modullar avtomatik faollashtirildi!",
+        "stars_added_msg": "✨ Hisobingizga *+{amount} UP Stars* avtomatik qo'shildi!",
+        "mod_hub_title": "🧩 *4 ta Maxsus Modul Boshqaruv Markazi*\nSozlash uchun kerakli modulni tanlang:"
     },
     "ru": {
-        "title": "🚀 *Глобальная Экосистема MessengerUP*",
+        "title": "🚀 *Официальный Бот Авто-Оплаты MessengerUP*",
         "your_id": "🆔 Ваш ID:",
-        "vip_status": "💎 UpPremium:",
+        "vip_status": "💎 UP Premium:",
         "active": "Активен ✅ (VIP)",
         "inactive": "Не активен ❌",
-        "balance": "✨ Баланс UpStar:",
+        "balance": "✨ Баланс UP Stars:",
         "active_mods": "🧩 Активные модули:",
-        "choose": "Выберите нужный раздел:",
-        "btn_uz_pay": "💳 Карты Uzcard / Humo",
-        "btn_int_pay": "🌍 Visa / Mastercard / USDT (Мир)",
-        "btn_mods": "🧩 4 Спец-Модуля (Управление и Демо)",
+        "choose": "Выберите нужный пакет или раздел:",
+        "btn_buy_prem": "💎 Купить UP Premium (Месяц / Год -37%)",
+        "btn_buy_stars": "✨ Пакеты UP Stars (100 — 150 000 Stars)",
+        "btn_mods": "🧩 4 Спец-Модуля (Центр Управления)",
         "btn_lang": "🌐 Язык / Language",
-        "btn_sync": "🔄 Синхронизация с приложением",
+        "btn_sync": "🔄 Синхронизация",
         "btn_back": "⬅️ Назад",
-        "select_lang": "🌐 *Выберите язык интерфейса (Поддержка 270 стран):*",
-        "mod_hub_title": "🧩 *Центр Управления 4 Спец-Модулями*\nНажмите на любой модуль ниже, чтобы протестировать его функции и настроить параметры:",
-        "mod_btn_1": "🛡️ 1. Ghost Vault (Секретный Сейф и Анти-Шпион) ⚙️",
-        "mod_btn_2": "🤖 2. AI Manager (24/7 ИИ-Секретарь) ⚙️",
-        "mod_btn_3": "🌐 3. Mesh Network (Оффлайн P2P и Майнинг) ⚙️",
-        "mod_btn_4": "💰 4. Media-Paywall (Монетизация Контента) ⚙️",
-        "status_label": "Статус",
-        "ghost_title": "🛡️ *Ghost Vault (Секретный Сейф и Анти-Шпион)*",
-        "ghost_info": "Защищает личные чаты двойным PIN-кодом и блокирует создание скриншотов или запись экрана.",
-        "ghost_btn_anti": "📵 Защита от скриншотов и записи",
-        "ghost_btn_decoy": "🔐 Ложный пароль (Decoy PIN)",
-        "ghost_btn_timer": "⏱ Таймер авто-удаления",
-        "ai_title": "🤖 *AI Manager (24/7 Персональный ИИ-Секретарь)*",
-        "ai_info": "Автоматически отвечает, когда вы заняты, переводит голосовые в текст и синхронно переводит чаты на языки 270 стран.",
-        "ai_btn_reply": "💬 24/7 Умный ИИ-Автоответчик",
-        "ai_btn_tr": "🌍 Живой перевод чатов (270 стран)",
-        "ai_btn_voice": "🎙 Расшифровка голосовых сообщений",
-        "mesh_title": "🌐 *Mesh Network (Оффлайн P2P и Анти-Блок)*",
-        "mesh_info": "Передает сообщения без интернета через Bluetooth/Wi-Fi Direct, обходит блокировки и начисляет UpStar за раздачу сети.",
-        "mesh_btn_p2p": "📡 Оффлайн P2P Мост (Bluetooth/Wi-Fi)",
-        "mesh_btn_dpi": "⚡ Stealth DPI Обход блокировок",
-        "mesh_btn_mine": "⛏ Забрать бонус раздачи (+5 UpStar ✨)",
-        "mesh_mined_label": "Добытый бонус сети",
-        "paywall_title": "💰 *Media-Paywall (Монетизация Контента)*",
-        "paywall_info": "Закрывает фото, видео и файлы размытием (Blur) с оплатой в UpStar. Вы получаете 80% от каждой продажи на свой баланс.",
-        "paywall_btn_price": "🏷 Цена открытия по умолчанию",
-        "paywall_btn_demo": "🔗 Создать платную ссылку",
-        "paywall_sales_label": "Продаж",
-        "paywall_earned_label": "Заработано",
-        "paywall_demo_msg": "💰 *Платная ссылка на медиа готова!*\n\n🔒 Цена открытия: *{price} UpStar*\n🔗 Ссылка: `{link}`\n\n_Отправьте эту ссылку в чат или канал — пользователи заплатят вам {price} UpStar за доступ к файлу!_",
-        "pay_uz_text": "💳 *Оплата через карты Uzcard / Humo:*\n\n🔹 *Uzcard:* `5614682112210333`\n🔹 *Humo:* `9860170111318102`\n(Khasanov U.)\n\n• UpPremium (1 мес): 35,000 сум\n• 100 UpStar: 15,000 сум\n\n📌 После оплаты отправьте скриншот чека в этот бот!\n🆔 Ваш ID: `{uid}`",
-        "pay_int_text": "🌍 *Международная оплата (Visa / Mastercard / USDT):*\n\n🔹 *Visa USD:* `4023060246442007`\n🔹 *Visa UZS:* `4023060506933828`\n(Khasanov U.)\n\n• UpPremium (1 мес): $3.00\n• 100 UpStar: $1.50\n\n📌 Отправьте скриншот чека сюда для мгновенной активации!\n🆔 Ваш ID: `{uid}`",
-        "receipt_sent": "✅ Чек отправлен администратору! После проверки вам автоматически активируется VIP / UpStar.",
-        "alert_synced": "✅ Синхронизировано с приложением!",
-        "alert_updated": "✅ Настройка обновлена!",
-        "alert_mined": "🎉 +5 UpStar добавлено на ваш баланс!",
-        "alert_link_ready": "🔗 Платная ссылка создана!",
-        "vip_activated_msg": "🎉 *Поздравляем!* Вам активирован *UpPremium (VIP)* и все 4/4 спец-модуля!",
-        "stars_added_msg": "✨ На ваш баланс зачислено *+{amount} UpStar*!"
+        "btn_check_auto": "⚡ Авто-Проверка Оплаты",
+        "prem_menu_title": "💎 *Подписка UP Premium*\nОткройте все эксклюзивные возможности:\n\n• *Annual (Годовой -37%):* `269 990,00 сум/год` (`$21.99`)\n• *Monthly (Месячный):* `35 990,00 сум/мес` (`$2.99`)\n\nВыберите тариф:",
+        "stars_menu_title": "✨ *UP Stars — Выберите пакет*\nНажмите на нужный пакет UP Stars:",
+        "invoice_title": "🧾 *Заказ #{order_id}:*",
+        "invoice_exact_uzs": "⚡ *ТОЧНАЯ СУММА ДЛЯ АВТО-ОПЛАТЫ:*",
+        "invoice_usd": "🌍 *Цена в долларах (USD):*",
+        "invoice_cards": "💳 *Реквизиты для оплаты (Khasanov U.):*\n🔹 *Uzcard:* `5614682112210333`\n🔹 *Humo:* `9860170111318102`\n🔹 *Visa UZS:* `4023060506933828`\n🔹 *Visa USD:* `4023060246442007`\n\n🤖 *АВТО-АКТИВАЦИЯ ЗА 1 СЕКУНДУ:* Переведите ровно указанную сумму (`{exact_uzs} сум`) для автоматического распознавания ИЛИ отправьте скриншот чека сюда!",
+        "receipt_sent": "✅ Чек прошел проверку на уникальность и поставлен в очередь! Пакет скоро активируется.",
+        "dup_receipt": "❌ *Ошибка!* Этот чек уже был использован ранее! Отправьте новый действительный чек.",
+        "vip_activated_msg": "🎉 *Поздравляем!* Вам автоматически активирован *UP Premium (VIP)* и все 4/4 спец-модуля!",
+        "stars_added_msg": "✨ На ваш баланс зачислено *+{amount} UP Stars*!",
+        "mod_hub_title": "🧩 *Центр Управления 4 Спец-Модулями*\nВыберите модуль для настройки:"
     }
 }
 
 def auto_translate_gtx(text, target_lang):
-    """Istalgan 270 ta davlat tiliga (tr, ar, es, de, fr, zh, ja, ko, hi, pt, id...) avtomatik tarjima qiladi va SQLite keshda saqlaydi."""
     target_lang = (target_lang or "en").lower().split("-")[0][:2]
     if target_lang in ["uz", "ru", "en"]:
         return text
@@ -256,7 +232,6 @@ def auto_translate_gtx(text, target_lang):
         row = cur.fetchone()
         if row:
             return row[0]
-
     try:
         q = urllib.parse.quote(text)
         url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl=en&tl={target_lang}&dt=t&q={q}"
@@ -283,60 +258,124 @@ def tr_str(lang, key):
     en_val = CORE_STRINGS["en"].get(key, key)
     return auto_translate_gtx(en_val, lang)
 
-# ==============================================================================
-# FOYDALANUVCHI BAZASI VA GITHUB CLOUD SYNC
-# ==============================================================================
 def ensure_user(user_id, detected_lang=None, auto_vip=False):
     lang_code = (detected_lang or "en").lower().split("-")[0][:2]
     with db_lock:
         cur = conn.cursor()
-        cur.execute("SELECT is_premium, lang, mod_config FROM users WHERE user_id = ?", (user_id,))
+        cur.execute("SELECT is_premium, lang FROM users WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
         is_vip = 1 if (user_id == ADMIN_ID or auto_vip) else 0
         if not row:
             cur.execute(
-                "INSERT INTO users (user_id, is_premium, upstars, lang, mod_config) VALUES (?, ?, 0, ?, ?)",
+                "INSERT INTO users (user_id, is_premium, upstars, lang, mod_config, pending_pkg) VALUES (?, ?, 0, ?, ?, 'prem_monthly')",
                 (user_id, is_vip, lang_code, json.dumps(DEFAULT_MOD_CONFIG))
             )
             conn.commit()
         else:
             if is_vip == 1 and row[0] == 0:
                 cur.execute("UPDATE users SET is_premium = 1 WHERE user_id = ?", (user_id,))
-            if detected_lang and not row[1]:
-                cur.execute("UPDATE users SET lang = ? WHERE user_id = ?", (lang_code, user_id))
-            conn.commit()
+                conn.commit()
 
 def get_user_full(user_id):
     with db_lock:
         cur = conn.cursor()
         cur.execute("SELECT module_name FROM modules WHERE user_id = ?", (user_id,))
         mods = [r[0] for r in cur.fetchall()]
-        cur.execute("SELECT is_premium, upstars, lang, mod_config FROM users WHERE user_id = ?", (user_id,))
+        cur.execute("SELECT is_premium, upstars, lang, mod_config, pending_pkg FROM users WHERE user_id = ?", (user_id,))
         row = cur.fetchone()
         prem = bool(row[0]) if row else False
         stars = row[1] if row else 0
         lang = (row[2] if row and row[2] else "en")
+        pending_pkg = (row[4] if row and len(row) > 4 and row[4] else "prem_monthly")
         try:
             cfg = json.loads(row[3]) if row and row[3] else {}
         except Exception:
             cfg = {}
-
         for k, v in DEFAULT_MOD_CONFIG.items():
             if k not in cfg:
                 cfg[k] = dict(v)
-
         if (user_id == ADMIN_ID or len(mods) >= 4) and not prem:
             prem = True
             cur.execute("UPDATE users SET is_premium = 1 WHERE user_id = ?", (user_id,))
             conn.commit()
+        return prem, stars, mods, lang, cfg, pending_pkg
 
-        return prem, stars, mods, lang, cfg
+# ==============================================================================
+# AVTO-TO'LOV GENERATORI VA FULFILLMENT ENGINE
+# ==============================================================================
+def create_unique_order(user_id, pkg_key):
+    """Har bir mijozga 30 daqiqa davomida takrorlanmas noyob so'm summasini (masalan 35990 -> 35994) yaratadi."""
+    now = int(time.time())
+    base_uzs = PREMIUM_PACKAGES[pkg_key]["base_uzs"] if pkg_key in PREMIUM_PACKAGES else STAR_PACKAGES.get(pkg_key, STAR_PACKAGES["stars_100"])["base_uzs"]
 
-def save_mod_config(user_id, cfg):
     with db_lock:
-        conn.execute("UPDATE users SET mod_config = ? WHERE user_id = ?", (json.dumps(cfg), user_id))
+        conn.execute("UPDATE users SET pending_pkg = ? WHERE user_id = ?", (pkg_key, user_id))
+        cur = conn.cursor()
+        # Oxirgi 30 daqiqadagi band summalarni tekshirish
+        cur.execute("SELECT unique_uzs FROM payment_orders WHERE status = 'pending' AND created_at > ?", (now - 1800,))
+        used_amounts = {r[0] for r in cur.fetchall()}
+
+        unique_uzs = base_uzs + 1
+        for offset in range(1, 99):
+            candidate = base_uzs + offset
+            if candidate not in used_amounts:
+                unique_uzs = candidate
+                break
+
+        cur.execute(
+            "INSERT INTO payment_orders (user_id, pkg_key, unique_uzs, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+            (user_id, pkg_key, unique_uzs, now)
+        )
+        order_id = cur.lastrowid
         conn.commit()
-    sync_json_and_github()
+    return order_id, unique_uzs
+
+def fulfill_package_for_user(target_id, pkg_key, source_label="Auto-System"):
+    """Mijoz tanlagan paketni (VIP yoki 100..150000 UP Stars) avtomatik hisobga yozadi."""
+    ensure_user(target_id)
+    _, _, _, target_lang, _, _ = get_user_full(target_id)
+
+    if pkg_key in PREMIUM_PACKAGES:
+        with db_lock:
+            conn.execute("UPDATE users SET is_premium = 1 WHERE user_id = ?", (target_id,))
+            for m in ["GhostVault", "AIManager", "MeshNetwork", "MediaPaywall"]:
+                conn.execute("INSERT OR IGNORE INTO modules (user_id, module_name) VALUES (?, ?)", (target_id, m))
+            conn.execute("UPDATE payment_orders SET status = 'completed' WHERE user_id = ? AND status = 'pending'", (target_id,))
+            conn.commit()
+        sync_json_and_github()
+        send_message(target_id, tr_str(target_lang, "vip_activated_msg"))
+        send_message(ADMIN_ID, f"⚡ *[{source_label}]* `{target_id}` ga *{pkg_key}* avtomatik yoqildi!")
+        return True
+    elif pkg_key in STAR_PACKAGES:
+        amount = STAR_PACKAGES[pkg_key]["stars"]
+        with db_lock:
+            conn.execute("UPDATE users SET upstars = upstars + ? WHERE user_id = ?", (amount, target_id))
+            conn.execute("UPDATE payment_orders SET status = 'completed' WHERE user_id = ? AND status = 'pending'", (target_id,))
+            conn.commit()
+        sync_json_and_github()
+        send_message(target_id, tr_str(target_lang, "stars_added_msg").replace("{amount}", str(amount)))
+        send_message(ADMIN_ID, f"⚡ *[{source_label}]* `{target_id}` ga *+{amount} UP Stars* avtomatik qo'shildi!")
+        return True
+    return False
+
+def match_sms_and_auto_activate(sms_text):
+    """Telefondan kelgan Humo/Uzcard/Click/Payme SMS matnidan summani topib, 1 soniyada avto-tasdiqlaydi."""
+    clean = sms_text.replace(" ", "").replace(",", ".").replace("'", "")
+    numbers = re.findall(r"\d{5,9}", clean)
+    now = int(time.time())
+
+    with db_lock:
+        cur = conn.cursor()
+        cur.execute("SELECT order_id, user_id, pkg_key, unique_uzs FROM payment_orders WHERE status = 'pending' AND created_at > ? ORDER BY order_id DESC", (now - 3600,))
+        pending_orders = cur.fetchall()
+
+    for num_str in numbers:
+        val = int(num_str)
+        for oid, uid, pkey, u_uzs in pending_orders:
+            if val == u_uzs:
+                fulfill_package_for_user(uid, pkey, source_label=f"SMS-Auto #{oid}")
+                return True, uid, pkey
+    return False, 0, ""
 
 def sync_json_and_github():
     try:
@@ -348,16 +387,11 @@ def sync_json_and_github():
             for uid, prem, stars, lang, mcfg in rows:
                 cur.execute("SELECT module_name FROM modules WHERE user_id = ?", (uid,))
                 mods = [r[0] for r in cur.fetchall()]
-                try:
-                    parsed_cfg = json.loads(mcfg) if mcfg else DEFAULT_MOD_CONFIG
-                except Exception:
-                    parsed_cfg = DEFAULT_MOD_CONFIG
                 data[str(uid)] = {
                     "is_premium": bool(prem) or (len(mods) >= 4) or (uid == ADMIN_ID),
                     "upstars": stars,
                     "lang": lang or "en",
-                    "modules": mods,
-                    "mod_config": parsed_cfg
+                    "modules": mods
                 }
         with open(JSON_MIRROR_PATH, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
@@ -389,15 +423,12 @@ def edit_message(chat_id, message_id, text, reply_markup=None):
         payload["reply_markup"] = reply_markup
     tg_request("editMessageText", payload)
 
-# ==============================================================================
-# MENYULAR VA 4 TA MODUL INTERAKTIV VITRINASI (100% HAR QANDAY DAVLAT TILIDA)
-# ==============================================================================
 def build_main_menu_kb(target_uid, lang):
     return {
         "inline_keyboard": [
+            [{"text": tr_str(lang, "btn_buy_prem"), "callback_data": "menu_premium"}],
+            [{"text": tr_str(lang, "btn_buy_stars"), "callback_data": "menu_stars"}],
             [{"text": tr_str(lang, "btn_mods"), "callback_data": "modules_menu"}],
-            [{"text": tr_str(lang, "btn_int_pay"), "callback_data": f"pay_visa_{target_uid}"}],
-            [{"text": tr_str(lang, "btn_uz_pay"), "callback_data": f"pay_uz_{target_uid}"}],
             [
                 {"text": tr_str(lang, "btn_lang"), "callback_data": "lang_menu"},
                 {"text": tr_str(lang, "btn_sync"), "callback_data": f"sync_now_{target_uid}"}
@@ -405,8 +436,57 @@ def build_main_menu_kb(target_uid, lang):
         ]
     }
 
+def build_premium_packages_kb(lang):
+    return {
+        "inline_keyboard": [
+            [{"text": "🌟 Annual (-37%) — 269 990,00 so'm / $21.99", "callback_data": "pkg_prem_annual"}],
+            [{"text": "💎 Monthly (1 oy) — 35 990,00 so'm / $2.99", "callback_data": "pkg_prem_monthly"}],
+            [{"text": tr_str(lang, "btn_back"), "callback_data": "back_home"}]
+        ]
+    }
+
+def build_stars_packages_kb(lang):
+    rows = []
+    for key, info in STAR_PACKAGES.items():
+        btn_txt = f"✨ {info['label']} — {info['uzs']} ({info['usd']})"
+        rows.append([{"text": btn_txt, "callback_data": f"pkg_{key}"}])
+    rows.append([{"text": tr_str(lang, "btn_back"), "callback_data": "back_home"}])
+    return {"inline_keyboard": rows}
+
+def render_package_invoice(user_id, pkg_key, lang):
+    order_id, exact_uzs = create_unique_order(user_id, pkg_key)
+    formatted_exact = f"{exact_uzs:,}".replace(",", " ")
+
+    if pkg_key in PREMIUM_PACKAGES:
+        p = PREMIUM_PACKAGES[pkg_key]
+        t_key = f"title_{lang}" if f"title_{lang}" in p else "title_en"
+        pkg_title = p[t_key]
+        usd_price = p["usd"]
+        back_target = "menu_premium"
+    else:
+        s = STAR_PACKAGES.get(pkg_key, STAR_PACKAGES["stars_100"])
+        pkg_title = f"✨ UP Stars — {s['label']}"
+        usd_price = s["usd"]
+        back_target = "menu_stars"
+
+    cards_block = tr_str(lang, "invoice_cards").replace("{exact_uzs}", formatted_exact)
+    text = (
+        f"{tr_str(lang, 'invoice_title').replace('{order_id}', str(order_id))} *{pkg_title}*\n\n"
+        f"{tr_str(lang, 'invoice_exact_uzs')} `{formatted_exact} so'm`\n"
+        f"{tr_str(lang, 'invoice_usd')} `{usd_price}`\n\n"
+        f"{cards_block}\n"
+        f"🆔 ID: `{user_id}`"
+    )
+    kb = {
+        "inline_keyboard": [
+            [{"text": tr_str(lang, "btn_check_auto"), "callback_data": f"chk_ord_{order_id}"}],
+            [{"text": tr_str(lang, "btn_back"), "callback_data": back_target}]
+        ]
+    }
+    return text, kb
+
 def format_status_text(target_uid):
-    prem, stars, mods, lang, _ = get_user_full(target_uid)
+    prem, stars, mods, lang, _, _ = get_user_full(target_uid)
     st = tr_str(lang, "active") if prem else tr_str(lang, "inactive")
     return (
         f"{tr_str(lang, 'title')}\n\n"
@@ -417,117 +497,6 @@ def format_status_text(target_uid):
         f"{tr_str(lang, 'choose')}"
     )
 
-def render_module_showcase(user_id, mod_key):
-    prem, stars, mods, lang, cfg = get_user_full(user_id)
-    is_on = (mod_key in mods) or prem
-    st_word = tr_str(lang, "active") if is_on else tr_str(lang, "inactive")
-    st_icon = "✅ ON" if is_on else "❌ OFF"
-    m_cfg = cfg.get(mod_key, {})
-
-    lbl_status = tr_str(lang, "status_label")
-
-    if mod_key == "GhostVault":
-        lbl_anti = tr_str(lang, "ghost_btn_anti")
-        lbl_decoy = tr_str(lang, "ghost_btn_decoy")
-        lbl_timer = tr_str(lang, "ghost_btn_timer")
-        anti_st = "✅ ON" if m_cfg.get("anti_screenshot", True) else "❌ OFF"
-        decoy_st = "✅ ON" if m_cfg.get("decoy_pin", True) else "❌ OFF"
-        tmr = m_cfg.get("timer", "30s")
-
-        text = (
-            f"{tr_str(lang, 'ghost_title')}\n\n"
-            f"• *{lbl_status}:* {st_word}\n"
-            f"• *{lbl_anti}:* `{anti_st}`\n"
-            f"• *{lbl_decoy}:* `{decoy_st}`\n"
-            f"• *{lbl_timer}:* `{tmr}`\n\n"
-            f"_{tr_str(lang, 'ghost_info')}_"
-        )
-        kb = {
-            "inline_keyboard": [
-                [{"text": f"🛡️ Ghost Vault: {st_icon}", "callback_data": "toggle_mod_GhostVault"}],
-                [{"text": f"{lbl_anti}: {anti_st}", "callback_data": "cfg_GhostVault_anti"}],
-                [{"text": f"{lbl_decoy}: {decoy_st}", "callback_data": "cfg_GhostVault_decoy"}],
-                [{"text": f"{lbl_timer}: {tmr} (5s / 30s / 1m)", "callback_data": "cfg_GhostVault_timer"}],
-                [{"text": tr_str(lang, "btn_back"), "callback_data": "modules_menu"}]
-            ]
-        }
-    elif mod_key == "AIManager":
-        lbl_reply = tr_str(lang, "ai_btn_reply")
-        lbl_tr = tr_str(lang, "ai_btn_tr")
-        lbl_voice = tr_str(lang, "ai_btn_voice")
-        rep_st = "✅ ON" if m_cfg.get("auto_reply", True) else "❌ OFF"
-        tr_st = "✅ ON" if m_cfg.get("live_translate", True) else "❌ OFF"
-        vc_st = "✅ ON" if m_cfg.get("voice_summary", True) else "❌ OFF"
-
-        text = (
-            f"{tr_str(lang, 'ai_title')}\n\n"
-            f"• *{lbl_status}:* {st_word}\n"
-            f"• *{lbl_reply}:* `{rep_st}`\n"
-            f"• *{lbl_tr}:* `{tr_st}`\n"
-            f"• *{lbl_voice}:* `{vc_st}`\n\n"
-            f"_{tr_str(lang, 'ai_info')}_"
-        )
-        kb = {
-            "inline_keyboard": [
-                [{"text": f"🤖 AI Manager: {st_icon}", "callback_data": "toggle_mod_AIManager"}],
-                [{"text": f"{lbl_reply}: {rep_st}", "callback_data": "cfg_AIManager_reply"}],
-                [{"text": f"{lbl_tr}: {tr_st}", "callback_data": "cfg_AIManager_tr"}],
-                [{"text": f"{lbl_voice}: {vc_st}", "callback_data": "cfg_AIManager_voice"}],
-                [{"text": tr_str(lang, "btn_back"), "callback_data": "modules_menu"}]
-            ]
-        }
-    elif mod_key == "MeshNetwork":
-        lbl_p2p = tr_str(lang, "mesh_btn_p2p")
-        lbl_dpi = tr_str(lang, "mesh_btn_dpi")
-        lbl_mine = tr_str(lang, "mesh_btn_mine")
-        lbl_mined = tr_str(lang, "mesh_mined_label")
-        p2p_st = "✅ ON" if m_cfg.get("p2p_bridge", True) else "❌ OFF"
-        dpi_st = "✅ ON" if m_cfg.get("stealth_dpi", True) else "❌ OFF"
-        mined_val = m_cfg.get("mined_stars", 15)
-
-        text = (
-            f"{tr_str(lang, 'mesh_title')}\n\n"
-            f"• *{lbl_status}:* {st_word}\n"
-            f"• *{lbl_p2p}:* `{p2p_st}`\n"
-            f"• *{lbl_dpi}:* `{dpi_st}`\n"
-            f"• *{lbl_mined}:* `{mined_val} UpStar ✨`\n\n"
-            f"_{tr_str(lang, 'mesh_info')}_"
-        )
-        kb = {
-            "inline_keyboard": [
-                [{"text": f"🌐 Mesh Network: {st_icon}", "callback_data": "toggle_mod_MeshNetwork"}],
-                [{"text": f"{lbl_p2p}: {p2p_st}", "callback_data": "cfg_MeshNetwork_p2p"}],
-                [{"text": f"{lbl_dpi}: {dpi_st}", "callback_data": "cfg_MeshNetwork_dpi"}],
-                [{"text": lbl_mine, "callback_data": "cfg_MeshNetwork_mine"}],
-                [{"text": tr_str(lang, "btn_back"), "callback_data": "modules_menu"}]
-            ]
-        }
-    else:  # MediaPaywall
-        lbl_price = tr_str(lang, "paywall_btn_price")
-        lbl_demo = tr_str(lang, "paywall_btn_demo")
-        lbl_sales = tr_str(lang, "paywall_sales_label")
-        lbl_earned = tr_str(lang, "paywall_earned_label")
-        price_val = m_cfg.get("default_price", 25)
-        sales_val = m_cfg.get("sales_count", 0)
-        earned_val = m_cfg.get("earned_stars", 0)
-
-        text = (
-            f"{tr_str(lang, 'paywall_title')}\n\n"
-            f"• *{lbl_status}:* {st_word}\n"
-            f"• *{lbl_price}:* `{price_val} UpStar ✨`\n"
-            f"• *{lbl_sales}:* `{sales_val}` | *{lbl_earned}:* `{earned_val} UpStar`\n\n"
-            f"_{tr_str(lang, 'paywall_info')}_"
-        )
-        kb = {
-            "inline_keyboard": [
-                [{"text": f"💰 Media-Paywall: {st_icon}", "callback_data": "toggle_mod_MediaPaywall"}],
-                [{"text": f"{lbl_price}: {price_val} UpStar (10 / 25 / 50 / 100)", "callback_data": "cfg_MediaPaywall_price"}],
-                [{"text": lbl_demo, "callback_data": "cfg_MediaPaywall_demo"}],
-                [{"text": tr_str(lang, "btn_back"), "callback_data": "modules_menu"}]
-            ]
-        }
-    return text, kb
-
 def handle_update(update):
     if "message" in update:
         msg = update["message"]
@@ -536,9 +505,15 @@ def handle_update(update):
         user_id = user.get("id", chat_id)
         text = msg.get("text", "")
 
-        tg_lang = user.get("language_code", "en")
+        tg_lang = user.get("language_code", "uz")
         tg_is_prem = bool(user.get("is_premium", False))
         ensure_user(user_id, detected_lang=tg_lang, auto_vip=tg_is_prem)
+
+        # ADMIN BANK SMS MATNINI BOTGA FORWARD QILSA HAM AVTOMATIK TOPADI!
+        if user_id == ADMIN_ID and any(w in text.upper() for w in ["UZS", "HUMO", "UZCARD", "POPOLNENIE", "KIRIM", "SUM"]):
+            ok, matched_uid, matched_pkg = match_sms_and_auto_activate(text)
+            if ok:
+                return
 
         if text.startswith("/start"):
             parts = text.split(maxsplit=1)
@@ -556,32 +531,89 @@ def handle_update(update):
                     with db_lock:
                         conn.execute("UPDATE users SET lang = ? WHERE user_id = ?", (chosen_lang, user_id))
                         conn.commit()
-            if args.startswith("pay_"):
-                for token_part in args.split("_"):
-                    if token_part.isdigit() and len(token_part) >= 5:
-                        target_uid = int(token_part)
+
+            for token_part in args.split("_"):
+                if token_part.isdigit() and len(token_part) >= 6:
+                    target_uid = int(token_part)
 
             ensure_user(target_uid, detected_lang=chosen_lang, auto_vip=app_vip)
-            _, _, _, lang, _ = get_user_full(target_uid)
+            _, _, _, lang, _, _ = get_user_full(target_uid)
             sync_json_and_github()
-            send_message(chat_id, format_status_text(target_uid), build_main_menu_kb(target_uid, lang))
+
+            if "prem_annual" in args:
+                inv_txt, inv_kb = render_package_invoice(target_uid, "prem_annual", lang)
+                send_message(chat_id, inv_txt, inv_kb)
+            elif "prem_monthly" in args:
+                inv_txt, inv_kb = render_package_invoice(target_uid, "prem_monthly", lang)
+                send_message(chat_id, inv_txt, inv_kb)
+            elif "pay_premium" in args:
+                send_message(chat_id, tr_str(lang, "prem_menu_title"), build_premium_packages_kb(lang))
+            elif any(k in args for k in STAR_PACKAGES.keys()):
+                matched_key = next(k for k in STAR_PACKAGES.keys() if k in args)
+                inv_txt, inv_kb = render_package_invoice(target_uid, matched_key, lang)
+                send_message(chat_id, inv_txt, inv_kb)
+            elif "pay_stars" in args:
+                send_message(chat_id, tr_str(lang, "stars_menu_title"), build_stars_packages_kb(lang))
+            else:
+                send_message(chat_id, format_status_text(target_uid), build_main_menu_kb(target_uid, lang))
+
+        # ADMIN UCHUN 1-BUYRUQDA NAVBATDAGI BARCHA CHEKLARNI TASDIQLASH
+        elif text.startswith("/approve_all") and user_id == ADMIN_ID:
+            with db_lock:
+                cur = conn.cursor()
+                cur.execute("SELECT DISTINCT user_id, pkg_key FROM payment_orders WHERE status = 'pending'")
+                rows = cur.fetchall()
+            count = 0
+            for uid, pkey in rows:
+                if fulfill_package_for_user(uid, pkey, source_label="Batch-Admin"):
+                    count += 1
+            send_message(chat_id, f"✅ Navbatdagi *{count} ta* buyurtma birdaniga tasdiqlandi!")
 
         elif "photo" in msg or "document" in msg:
-            _, _, _, lang, _ = get_user_full(user_id)
+            _, _, _, lang, _, pending_pkg = get_user_full(user_id)
+
+            # 1. ANTI-DUBLIKAT TEKSHIRUVI (Bitta skrinshotni ikki marta yuborishni 100% bloklaydi!)
+            if "photo" in msg:
+                f_uniq = msg["photo"][-1].get("file_unique_id", "")
+                f_size = str(msg["photo"][-1].get("file_size", 0))
+            else:
+                f_uniq = msg["document"].get("file_unique_id", "")
+                f_size = str(msg["document"].get("file_size", 0))
+
+            receipt_hash = hashlib.sha256(f"{f_uniq}_{f_size}".encode()).hexdigest()
+            with db_lock:
+                cur = conn.cursor()
+                cur.execute("SELECT user_id FROM used_receipts WHERE file_hash = ?", (receipt_hash,))
+                if cur.fetchone():
+                    send_message(chat_id, tr_str(lang, "dup_receipt"))
+                    return
+                conn.execute("INSERT INTO used_receipts (file_hash, user_id, used_at) VALUES (?, ?, ?)", (receipt_hash, user_id, int(time.time())))
+                conn.commit()
+
             username = f"@{user.get('username')}" if user.get("username") else "N/A"
             full_name = f"{user.get('first_name', '')} {user.get('last_name', '')}".strip()
+
+            if pending_pkg in PREMIUM_PACKAGES:
+                p_info = PREMIUM_PACKAGES[pending_pkg]
+                pkg_desc = f"{p_info['title_uz']} ({p_info['uzs']})"
+            elif pending_pkg in STAR_PACKAGES:
+                s_info = STAR_PACKAGES[pending_pkg]
+                pkg_desc = f"UP Stars: {s_info['label']} ({s_info['uzs']})"
+            else:
+                pkg_desc = pending_pkg
+
             caption = (
-                f"💰 *New Payment Receipt!*\n"
-                f"🆔 ID: `{user_id}` | 🌐 Lang: `{lang.upper()}`\n"
-                f"👤 {full_name} ({username})"
+                f"💰 *Toza Chek (Anti-Dublikat: OK ✅)*\n"
+                f"🆔 ID: `{user_id}` | 🌐 Til: `{lang.upper()}`\n"
+                f"👤 {full_name} ({username})\n"
+                f"📦 *Paket:* `{pkg_desc}`"
             )
+            # ENG TEZKOR 1-TUGMA: Aynan foydalanuvchi tanlagan paketni 1-bosishda beradi!
             admin_kb = {
                 "inline_keyboard": [
-                    [{"text": "💎 Activate UpPremium (VIP)", "callback_data": f"adm_prem_{user_id}"}],
-                    [
-                        {"text": "✨ +100 UpStar", "callback_data": f"adm_star_{user_id}_100"},
-                        {"text": "✨ +500 UpStar", "callback_data": f"adm_star_{user_id}_500"}
-                    ]
+                    [{"text": f"⚡ 1-Click Tasdiqlash: {pkg_desc}", "callback_data": f"adm_auto_{user_id}_{pending_pkg}"}],
+                    [{"text": "🚀 Barcha Navbatdagilarni Tasdiqlash (/approve_all)", "callback_data": "adm_batch_all"}],
+                    [{"text": "❌ Chekni Rad Etish", "callback_data": f"adm_reject_{user_id}"}]
                 ]
             }
             if "photo" in msg:
@@ -598,15 +630,61 @@ def handle_update(update):
         chat_id = call["message"]["chat"]["id"]
         message_id = call["message"]["message_id"]
 
-        prem, stars, mods, lang, cfg = get_user_full(user_id)
+        prem, stars, mods, lang, cfg, _ = get_user_full(user_id)
 
-        if data.startswith("sync_now_"):
-            tg_request("answerCallbackQuery", {"callback_query_id": call_id, "text": tr_str(lang, "alert_synced")})
+        if data.startswith("chk_ord_"):
+            order_id = int(data.split("_")[2])
+            with db_lock:
+                cur = conn.cursor()
+                cur.execute("SELECT status FROM payment_orders WHERE order_id = ?", (order_id,))
+                r = cur.fetchone()
+            if r and r[0] == "completed":
+                tg_request("answerCallbackQuery", {"callback_query_id": call_id, "text": "✅ Payment confirmed! Package active!", "show_alert": True})
+                edit_message(chat_id, message_id, format_status_text(user_id), build_main_menu_kb(user_id, lang))
+            else:
+                tg_request("answerCallbackQuery", {"callback_query_id": call_id, "text": "⏳ SMS hali kelmadi yoki chek skrinshotini shu yerga tashlang!", "show_alert": True})
+            return
+
+        tg_request("answerCallbackQuery", {"callback_query_id": call_id})
+
+        if data == "back_home" or data.startswith("sync_now_"):
             sync_json_and_github()
             edit_message(chat_id, message_id, format_status_text(user_id), build_main_menu_kb(user_id, lang))
 
+        elif data == "menu_premium":
+            edit_message(chat_id, message_id, tr_str(lang, "prem_menu_title"), build_premium_packages_kb(lang))
+
+        elif data == "menu_stars":
+            edit_message(chat_id, message_id, tr_str(lang, "stars_menu_title"), build_stars_packages_kb(lang))
+
+        elif data.startswith("pkg_"):
+            pkg_key = data.replace("pkg_", "")
+            inv_txt, inv_kb = render_package_invoice(user_id, pkg_key, lang)
+            edit_message(chat_id, message_id, inv_txt, inv_kb)
+
+        elif data.startswith("adm_auto_") and user_id == ADMIN_ID:
+            parts = data.split("_", 3)
+            target_id = int(parts[2])
+            pkg_key = parts[3]
+            fulfill_package_for_user(target_id, pkg_key, source_label="1-Click Admin")
+
+        elif data == "adm_batch_all" and user_id == ADMIN_ID:
+            with db_lock:
+                cur = conn.cursor()
+                cur.execute("SELECT DISTINCT user_id, pkg_key FROM payment_orders WHERE status = 'pending'")
+                rows = cur.fetchall()
+            count = 0
+            for uid, pkey in rows:
+                if fulfill_package_for_user(uid, pkey, source_label="Batch-Admin"):
+                    count += 1
+            send_message(chat_id, f"✅ Navbatdagi *{count} ta* buyurtma birdaniga tasdiqlandi!")
+
+        elif data.startswith("adm_reject_") and user_id == ADMIN_ID:
+            target_id = int(data.split("_")[2])
+            send_message(target_id, "⚠️ To'lov chekingiz tasdiqlanmadi. Qaytadan tekshirib yuboring.")
+            send_message(chat_id, f"❌ `{target_id}` cheki rad etildi.")
+
         elif data == "lang_menu":
-            tg_request("answerCallbackQuery", {"callback_query_id": call_id})
             kb = {
                 "inline_keyboard": [
                     [
@@ -619,25 +697,10 @@ def handle_update(update):
                         {"text": "🇸🇦 العربية", "callback_data": "setlang_ar"},
                         {"text": "🇪🇸 Español", "callback_data": "setlang_es"}
                     ],
-                    [
-                        {"text": "🇩🇪 Deutsch", "callback_data": "setlang_de"},
-                        {"text": "🇫🇷 Français", "callback_data": "setlang_fr"},
-                        {"text": "🇵🇹 Português", "callback_data": "setlang_pt"}
-                    ],
-                    [
-                        {"text": "🇮🇳 हिन्दी", "callback_data": "setlang_hi"},
-                        {"text": "🇮🇩 Indonesia", "callback_data": "setlang_id"},
-                        {"text": "🇨🇳 中文", "callback_data": "setlang_zh"}
-                    ],
-                    [
-                        {"text": "🇯🇵 日本語", "callback_data": "setlang_ja"},
-                        {"text": "🇰🇷 한국어", "callback_data": "setlang_ko"},
-                        {"text": "🇮🇹 Italiano", "callback_data": "setlang_it"}
-                    ],
-                    [{"text": tr_str(lang, "btn_back"), "callback_data": f"sync_now_{user_id}"}]
+                    [{"text": tr_str(lang, "btn_back"), "callback_data": "back_home"}]
                 ]
             }
-            edit_message(chat_id, message_id, tr_str(lang, "select_lang"), kb)
+            edit_message(chat_id, message_id, "🌐 *Select your interface language (270 Countries):*", kb)
 
         elif data.startswith("setlang_"):
             new_l = data.split("_")[1]
@@ -645,27 +708,19 @@ def handle_update(update):
                 conn.execute("UPDATE users SET lang = ? WHERE user_id = ?", (new_l, user_id))
                 conn.commit()
             sync_json_and_github()
-            tg_request("answerCallbackQuery", {"callback_query_id": call_id, "text": f"🌐 {new_l.upper()}"})
             edit_message(chat_id, message_id, format_status_text(user_id), build_main_menu_kb(user_id, new_l))
 
         elif data == "modules_menu":
-            tg_request("answerCallbackQuery", {"callback_query_id": call_id})
             kb = {
                 "inline_keyboard": [
-                    [{"text": tr_str(lang, "mod_btn_1"), "callback_data": "open_mod_GhostVault"}],
-                    [{"text": tr_str(lang, "mod_btn_2"), "callback_data": "open_mod_AIManager"}],
-                    [{"text": tr_str(lang, "mod_btn_3"), "callback_data": "open_mod_MeshNetwork"}],
-                    [{"text": tr_str(lang, "mod_btn_4"), "callback_data": "open_mod_MediaPaywall"}],
-                    [{"text": tr_str(lang, "btn_back"), "callback_data": f"sync_now_{user_id}"}]
+                    [{"text": "🛡️ 1. Ghost Vault (" + ("✅" if "GhostVault" in mods or prem else "❌") + ")", "callback_data": "toggle_mod_GhostVault"}],
+                    [{"text": "🤖 2. AI Manager (" + ("✅" if "AIManager" in mods or prem else "❌") + ")", "callback_data": "toggle_mod_AIManager"}],
+                    [{"text": "🌐 3. Mesh Network (" + ("✅" if "MeshNetwork" in mods or prem else "❌") + ")", "callback_data": "toggle_mod_MeshNetwork"}],
+                    [{"text": "💰 4. Media-Paywall (" + ("✅" if "MediaPaywall" in mods or prem else "❌") + ")", "callback_data": "toggle_mod_MediaPaywall"}],
+                    [{"text": tr_str(lang, "btn_back"), "callback_data": "back_home"}]
                 ]
             }
             edit_message(chat_id, message_id, tr_str(lang, "mod_hub_title"), kb)
-
-        elif data.startswith("open_mod_"):
-            mod_key = data.replace("open_mod_", "")
-            tg_request("answerCallbackQuery", {"callback_query_id": call_id})
-            txt, kb = render_module_showcase(user_id, mod_key)
-            edit_message(chat_id, message_id, txt, kb)
 
         elif data.startswith("toggle_mod_"):
             mod_key = data.replace("toggle_mod_", "")
@@ -676,97 +731,7 @@ def handle_update(update):
                     conn.execute("INSERT OR IGNORE INTO modules (user_id, module_name) VALUES (?, ?)", (user_id, mod_key))
                 conn.commit()
             sync_json_and_github()
-            tg_request("answerCallbackQuery", {"callback_query_id": call_id, "text": tr_str(lang, "alert_updated")})
-            txt, kb = render_module_showcase(user_id, mod_key)
-            edit_message(chat_id, message_id, txt, kb)
-
-        elif data.startswith("cfg_"):
-            _, mod_key, param = data.split("_")
-            m_cfg = cfg.get(mod_key, {})
-            alert_txt = tr_str(lang, "alert_updated")
-
-            if mod_key == "GhostVault":
-                if param == "anti":
-                    m_cfg["anti_screenshot"] = not m_cfg.get("anti_screenshot", True)
-                elif param == "decoy":
-                    m_cfg["decoy_pin"] = not m_cfg.get("decoy_pin", True)
-                elif param == "timer":
-                    timers = ["5s", "30s", "1m", "5m"]
-                    cur_t = m_cfg.get("timer", "30s")
-                    m_cfg["timer"] = timers[(timers.index(cur_t) + 1) % len(timers)] if cur_t in timers else "30s"
-            elif mod_key == "AIManager":
-                if param == "reply":
-                    m_cfg["auto_reply"] = not m_cfg.get("auto_reply", True)
-                elif param == "tr":
-                    m_cfg["live_translate"] = not m_cfg.get("live_translate", True)
-                elif param == "voice":
-                    m_cfg["voice_summary"] = not m_cfg.get("voice_summary", True)
-            elif mod_key == "MeshNetwork":
-                if param == "p2p":
-                    m_cfg["p2p_bridge"] = not m_cfg.get("p2p_bridge", True)
-                elif param == "dpi":
-                    m_cfg["stealth_dpi"] = not m_cfg.get("stealth_dpi", True)
-                elif param == "mine":
-                    m_cfg["mined_stars"] = m_cfg.get("mined_stars", 15) + 5
-                    with db_lock:
-                        conn.execute("UPDATE users SET upstars = upstars + 5 WHERE user_id = ?", (user_id,))
-                        conn.commit()
-                    alert_txt = tr_str(lang, "alert_mined")
-            elif mod_key == "MediaPaywall":
-                if param == "price":
-                    prices = [10, 25, 50, 100]
-                    cur_p = m_cfg.get("default_price", 25)
-                    m_cfg["default_price"] = prices[(prices.index(cur_p) + 1) % len(prices)] if cur_p in prices else 25
-                elif param == "demo":
-                    price = m_cfg.get("default_price", 25)
-                    demo_link = f"https://t.me/messengeruppremium_bot?start=unlock_{user_id}_{price}_lang_{lang}"
-                    msg_demo = tr_str(lang, "paywall_demo_msg").replace("{price}", str(price)).replace("{link}", demo_link)
-                    send_message(chat_id, msg_demo)
-                    alert_txt = tr_str(lang, "alert_link_ready")
-
-            cfg[mod_key] = m_cfg
-            save_mod_config(user_id, cfg)
-            tg_request("answerCallbackQuery", {"callback_query_id": call_id, "text": alert_txt})
-            txt, kb = render_module_showcase(user_id, mod_key)
-            edit_message(chat_id, message_id, txt, kb)
-
-        elif data.startswith("pay_uz"):
-            tg_request("answerCallbackQuery", {"callback_query_id": call_id})
-            msg_text = tr_str(lang, "pay_uz_text").replace("{uid}", str(user_id))
-            kb = {"inline_keyboard": [[{"text": tr_str(lang, "btn_back"), "callback_data": f"sync_now_{user_id}"}]]}
-            edit_message(chat_id, message_id, msg_text, kb)
-
-        elif data.startswith("pay_visa"):
-            tg_request("answerCallbackQuery", {"callback_query_id": call_id})
-            msg_text = tr_str(lang, "pay_int_text").replace("{uid}", str(user_id))
-            kb = {"inline_keyboard": [[{"text": tr_str(lang, "btn_back"), "callback_data": f"sync_now_{user_id}"}]]}
-            edit_message(chat_id, message_id, msg_text, kb)
-
-        elif data.startswith("adm_prem_") and user_id == ADMIN_ID:
-            target_id = int(data.split("_")[2])
-            ensure_user(target_id, auto_vip=True)
-            with db_lock:
-                for m in ["GhostVault", "AIManager", "MeshNetwork", "MediaPaywall"]:
-                    conn.execute("INSERT OR IGNORE INTO modules (user_id, module_name) VALUES (?, ?)", (target_id, m))
-                conn.commit()
-            sync_json_and_github()
-            _, _, _, target_lang, _ = get_user_full(target_id)
-            tg_request("answerCallbackQuery", {"callback_query_id": call_id, "text": "✅ VIP Activated!"})
-            send_message(chat_id, f"✅ `{target_id}` -> UpPremium (VIP) Activated!")
-            send_message(target_id, tr_str(target_lang, "vip_activated_msg"))
-
-        elif data.startswith("adm_star_") and user_id == ADMIN_ID:
-            parts = data.split("_")
-            target_id, amount = int(parts[2]), int(parts[3])
-            ensure_user(target_id)
-            with db_lock:
-                conn.execute("UPDATE users SET upstars = upstars + ? WHERE user_id = ?", (amount, target_id))
-                conn.commit()
-            sync_json_and_github()
-            _, _, _, target_lang, _ = get_user_full(target_id)
-            tg_request("answerCallbackQuery", {"callback_query_id": call_id, "text": f"+{amount} UpStars!"})
-            send_message(chat_id, f"✅ `{target_id}` -> +{amount} UpStar!")
-            send_message(target_id, tr_str(target_lang, "stars_added_msg").replace("{amount}", str(amount)))
+            edit_message(chat_id, message_id, format_status_text(user_id), build_main_menu_kb(user_id, lang))
 
 class APIServer(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -778,16 +743,15 @@ class APIServer(BaseHTTPRequestHandler):
             uid = 0
 
         if parsed.path == "/":
-            body = json.dumps({"status": "MessengerUP Global 24/7 Server Active", "countries": 270}).encode("utf-8")
+            body = json.dumps({"status": "MessengerUP Auto-Pay Server Active"}).encode("utf-8")
         elif parsed.path == "/status":
-            prem, stars, mods, lang, cfg = get_user_full(uid)
-            body = json.dumps({
-                "is_premium": prem,
-                "upstars": stars,
-                "lang": lang,
-                "modules": mods,
-                "mod_config": cfg
-            }).encode("utf-8")
+            prem, stars, mods, lang, cfg, _ = get_user_full(uid)
+            body = json.dumps({"is_premium": prem, "upstars": stars, "lang": lang, "modules": mods, "mod_config": cfg}).encode("utf-8")
+        elif parsed.path == "/sms_webhook":
+            # Android SMS Forwarder ilovasidan kelgan bank SMS xabarini 1 soniyada avto-tasdiqlash!
+            sms_text = params.get("text", [""])[0]
+            ok, matched_uid, matched_pkg = match_sms_and_auto_activate(sms_text)
+            body = json.dumps({"ok": ok, "user_id": matched_uid, "package": matched_pkg}).encode("utf-8")
         elif parsed.path == "/transfer":
             try:
                 from_id = int(params.get("from_id", ["0"])[0])
@@ -797,14 +761,14 @@ class APIServer(BaseHTTPRequestHandler):
                 from_id, to_id, amount = 0, 0, 0
             ensure_user(from_id)
             ensure_user(to_id)
-            _, sender_stars, _, _, _ = get_user_full(from_id)
+            _, sender_stars, _, _, _, _ = get_user_full(from_id)
             if amount > 0 and sender_stars >= amount:
                 with db_lock:
                     conn.execute("UPDATE users SET upstars = upstars - ? WHERE user_id = ?", (amount, from_id))
                     conn.execute("UPDATE users SET upstars = upstars + ? WHERE user_id = ?", (amount, to_id))
                     conn.commit()
                 sync_json_and_github()
-                _, _, _, to_lang, _ = get_user_full(to_id)
+                _, _, _, to_lang, _, _ = get_user_full(to_id)
                 send_message(to_id, tr_str(to_lang, "stars_added_msg").replace("{amount}", str(amount)))
                 body = json.dumps({"ok": True, "new_balance": sender_stars - amount}).encode("utf-8")
             else:
@@ -827,7 +791,7 @@ if __name__ == "__main__":
     sync_json_and_github()
     tg_request("deleteWebhook")
     threading.Thread(target=lambda: HTTPServer(("0.0.0.0", PORT), APIServer).serve_forever(), daemon=True).start()
-    print(f"✅ MessengerUP Global Server (270 Countries) {PORT}-portda ishga tushdi!")
+    print(f"✅ MessengerUP Auto-Pay Server {PORT}-portda ishga tushdi!")
     offset = 0
     while True:
         res = tg_request("getUpdates", {"offset": offset, "timeout": 25})
