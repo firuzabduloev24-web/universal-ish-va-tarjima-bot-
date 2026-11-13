@@ -1,0 +1,17 @@
+{
+  "1021089367": {
+    "is_premium": true,
+    "upstars": 0,
+    "modules": [
+      "AIManager",
+      "GhostVault",
+      "MediaPaywall",
+      "MeshNetwork"
+    ]
+  },
+  "7602427933": {
+    "is_premium": false,
+    "upstars": 0,
+    "modules": []
+  }
+}
