@@ -2,21 +2,25 @@
   "1021089367": {
     "is_premium": true,
     "upstars": 0,
+    "lang": "en",
     "modules": [
       "AIManager",
       "GhostVault",
       "MediaPaywall",
       "MeshNetwork"
-    ]
+    ],
+    "updated_at": 1794655229
   },
   "7602427933": {
     "is_premium": true,
-    "upstars": 0,
+    "upstars": 16350,
+    "lang": "en",
     "modules": [
       "AIManager",
       "GhostVault",
       "MediaPaywall",
       "MeshNetwork"
-    ]
+    ],
+    "updated_at": 1794655229
   }
 }
