@@ -4,23 +4,23 @@
     "upstars": 0,
     "lang": "en",
     "modules": [
-      "AIManager",
       "GhostVault",
-      "MediaPaywall",
-      "MeshNetwork"
+      "AIManager",
+      "MeshNetwork",
+      "MediaPaywall"
     ],
-    "updated_at": 1794655232
+    "updated_at": 1794665347
   },
   "7602427933": {
     "is_premium": true,
-    "upstars": 26350,
+    "upstars": 27350,
     "lang": "en",
     "modules": [
-      "AIManager",
       "GhostVault",
-      "MediaPaywall",
-      "MeshNetwork"
+      "AIManager",
+      "MeshNetwork",
+      "MediaPaywall"
     ],
-    "updated_at": 1794655232
+    "updated_at": 1794665347
   }
 }
