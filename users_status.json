@@ -9,11 +9,11 @@
       "MeshNetwork",
       "MediaPaywall"
     ],
-    "updated_at": 1794668461
+    "updated_at": 1794669590
   },
   "7602427933": {
     "is_premium": true,
-    "upstars": 78550,
+    "upstars": 79050,
     "lang": "en",
     "modules": [
       "GhostVault",
@@ -21,6 +21,6 @@
       "MeshNetwork",
       "MediaPaywall"
     ],
-    "updated_at": 1794668461
+    "updated_at": 1794669590
   }
 }
